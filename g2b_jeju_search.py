@@ -4,20 +4,29 @@
 
 사용 전 준비:
 1. pip install requests openpyxl --break-system-packages   (또는 그냥 pip install requests openpyxl)
-2. 아래 SERVICE_KEY 에 data.go.kr에서 발급받은 "Decoding" 인증키를 넣으세요.
-   (마이페이지 > 개발계정 상세보기 > 일반 인증키(Decoding) 값)
-3. 조회 기간(START_DATE, END_DATE)을 원하는 범위로 수정하세요. (형식: YYYYMMDDHHMM)
+2. 인증키 설정 (코드에 직접 넣지 말 것 — 저장소에 커밋되지 않도록)
+   - 스크립트와 같은 폴더에 .env 파일을 만들고 한 줄 입력:  G2B_SERVICE_KEY=발급받은키
+     (.env 는 .gitignore 에 포함되어 있음)
+   - 또는 환경변수 G2B_SERVICE_KEY 로 지정
+   - Encoding/Decoding 키 어느 쪽을 넣어도 됨 (%2F 등 인코딩된 키는 자동 디코딩)
+3. 조회 기간: 인자로 지정하거나, 생략하면 최근 7일 (형식: YYYYMMDDHHMM)
 
 실행:
-    python g2b_jeju_search.py
+    python g2b_jeju_search.py                              # 최근 7일
+    python g2b_jeju_search.py 202611010000 202611072359    # 기간 지정
 
 결과:
     - jeju_filtered.xlsx  : 제주 + 건축설계/CM/안전진단 키워드가 걸린 공고만
     - all_raw.csv         : 조회 기간 전체 원본 데이터 (백업/재검토용)
 """
 
+import os
+import sys
 import time
 import csv
+import urllib.parse
+from datetime import datetime, timedelta
+
 import requests
 
 try:
@@ -30,12 +39,32 @@ except ImportError:
 # =========================
 # 1. 설정값 (여기를 수정하세요)
 # =========================
-SERVICE_KEY = "여기에_Decoding_인증키를_붙여넣으세요"
+def load_service_key():
+    """환경변수 G2B_SERVICE_KEY → 스크립트 폴더의 .env 순으로 인증키를 읽는다."""
+    key = os.environ.get("G2B_SERVICE_KEY", "").strip()
+    if not key:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_path):
+            with open(env_path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("G2B_SERVICE_KEY="):
+                        key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+    # Encoding 키(%2F, %3D 등 포함)가 들어오면 Decoding 키로 변환 (requests가 다시 인코딩함)
+    if "%" in key:
+        key = urllib.parse.unquote(key)
+    return key
+
+
+SERVICE_KEY = load_service_key()
 
 BASE_URL = "https://apis.data.go.kr/1230000/ad/BidPublicInfoService/getBidPblancListInfoServcPPSSrch"
 
-START_DATE = "202607270000"   # 조회 시작일시 (YYYYMMDDHHMM)
-END_DATE   = "202608022359"   # 조회 종료일시 (YYYYMMDDHHMM)
+# 조회 기간 (YYYYMMDDHHMM): 명령행 인자 > 기본값(최근 7일)
+_now = datetime.now()
+START_DATE = sys.argv[1] if len(sys.argv) > 1 else (_now - timedelta(days=7)).strftime("%Y%m%d0000")
+END_DATE   = sys.argv[2] if len(sys.argv) > 2 else _now.strftime("%Y%m%d2359")
 
 NUM_OF_ROWS = 100             # 페이지당 건수 (최대 100 권장)
 
@@ -122,6 +151,21 @@ def normalize_row(item):
 # 3. 메인 수집 로직
 # =========================
 
+MAX_RETRIES = 5
+
+
+def get_with_retry(params, page):
+    """일시적 연결 끊김(Connection reset 등)에 대비해 지수 백오프로 재시도."""
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return requests.get(BASE_URL, params=params, timeout=30)
+        except requests.exceptions.RequestException as e:
+            wait = 2 ** attempt
+            print(f"[페이지 {page}] 요청 실패({type(e).__name__}) - {wait}초 후 재시도 {attempt}/{MAX_RETRIES}")
+            time.sleep(wait)
+    return None
+
+
 def fetch_all():
     all_items = []
     page = 1
@@ -138,7 +182,10 @@ def fetch_all():
             "type": "json",
         }
 
-        resp = requests.get(BASE_URL, params=params, timeout=30)
+        resp = get_with_retry(params, page)
+        if resp is None:
+            print(f"[페이지 {page}] 재시도 초과로 수집 중단 (누적 {len(all_items)}건까지 저장)")
+            break
 
         try:
             data = resp.json()
@@ -211,8 +258,8 @@ def save_filtered(items, path):
 
 
 def main():
-    if SERVICE_KEY.startswith("여기에"):
-        print("오류: SERVICE_KEY를 먼저 설정하세요 (스크립트 상단 SERVICE_KEY 변수).")
+    if not SERVICE_KEY:
+        print("오류: 인증키가 없습니다. .env 파일에 G2B_SERVICE_KEY=키 를 입력하거나 환경변수로 지정하세요.")
         return
 
     print(f"조회 기간: {START_DATE} ~ {END_DATE}")
