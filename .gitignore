@@ -1,5 +1,11 @@
+# 인증키
+.env
+
+# 실행 결과물
 jeju_filtered.xlsx
 jeju_filtered.csv
 all_raw.csv
+seen_notices.json
+
 __pycache__/
 *.pyc

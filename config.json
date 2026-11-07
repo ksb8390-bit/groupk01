@@ -1,0 +1,16 @@
+{
+  "_설명": "키워드·지역 설정. 수정 후 저장하면 다음 실행부터 반영. 빠진 항목은 스크립트 기본값 사용.",
+  "subject_keywords": [
+    "건축설계", "설계용역", "기본설계", "실시설계", "리모델링",
+    "건설사업관리", "CM용역", "감리",
+    "안전진단", "정밀안전진단", "정밀점검", "정밀안전점검", "정기안전점검", "안전점검"
+  ],
+  "exclude_keywords": [],
+  "region_keywords": ["제주"],
+  "region_fields": ["demand_inst", "notice_inst", "subject"],
+  "num_of_rows": 100,
+  "chunk_days": 7,
+  "request_delay_sec": 0.3,
+  "max_retries": 3,
+  "deadline_warn_days": 3
+}
