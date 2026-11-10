@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <h1>연차 현황</h1>
+  <p class="small muted">입사일 기준 자동 산정(근로기준법 제60조). 출근율 80% 미달·미개근월, 회계연도 기준 전환 정산, 이월·사용촉진(제61조) 결과 등은 아래 '조정'으로 반영합니다.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>이름</th><th>입사일</th><th>구분</th><th>산정기간</th><th>발생</th><th>조정</th><th>사용</th><th>대기</th><th>잔여</th></tr></thead>
+    <tbody>{% for u, b in rows %}
+    <tr><td>{{ u.name }}</td><td class="small">{{ u.hire_date }}</td><td class="small">{{ b.kind }}</td>
+      <td class="small">{{ b.period_start }}~{{ b.period_end }}</td><td>{{ b.granted }}</td><td>{{ '%g'|format(b.adjust) }}</td>
+      <td>{{ '%g'|format(b.used) }}</td><td>{{ '%g'|format(b.pending) }}</td><td><b>{{ '%g'|format(b.remain) }}</b></td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+<section class="card">
+  <h2>연차 조정</h2>
+  <form method="post" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <select name="user_id">{% for u, b in rows %}<option value="{{ u.id }}">{{ u.name }}</option>{% endfor %}</select>
+    <input type="number" step="0.25" name="days" placeholder="일수(±)" required>
+    <input name="reason" placeholder="사유 (예: 2026년 이월분)" required>
+    <button class="btn primary small">반영</button>
+  </form>
+  <ul class="list small">{% for a in adjs %}<li>{{ a.created_at[:10] }} {{ a.name }} {{ '%+g'|format(a.days) }}일 — {{ a.reason }}</li>{% endfor %}</ul>
+</section>
+{% endblock %}

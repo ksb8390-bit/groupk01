@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <div class="row between"><h1>월간 근태 집계</h1>
+    <form method="get" class="row"><input type="month" name="month" value="{{ ym }}" onchange="this.form.submit()">
+      <a class="btn" href="{{ url_for('export_month', month=ym) }}">엑셀 다운로드</a></form></div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>이름</th><th>부서</th><th>출근일</th><th>총 근로</th><th>지각</th><th>휴가(일)</th></tr></thead>
+    <tbody>{% for s in summary %}
+      <tr><td><a href="{{ url_for('admin_attendance', user=s.u.id, month=ym) }}">{{ s.u.name }}</a></td><td class="small">{{ s.u.dept or '' }}</td>
+      <td>{{ s.work_days }}</td><td>{{ hm(s.total) }}</td><td>{{ s.late }}</td><td>{{ '%g'|format(s.leave) }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

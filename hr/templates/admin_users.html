@@ -1,0 +1,41 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <h1>{{ '직원 정보 수정' if edit else '직원 등록' }}</h1>
+  <form method="post" class="formgrid">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    {% if edit %}<input type="hidden" name="id" value="{{ edit.id }}">{% endif %}
+    {% if not edit %}<label>아이디<input name="login_id" required></label>
+    <label>임시 비밀번호 (비우면 자동생성)<input name="password"></label>{% endif %}
+    <label>이름<input name="name" value="{{ edit.name if edit }}" required></label>
+    <label>권한<select name="role">{% for k,v in ROLES.items() %}<option value="{{k}}" {{ 'selected' if edit and edit.role==k or (not edit and k=='employee') }}>{{v}}</option>{% endfor %}</select></label>
+    <label>부서<select name="department_id"><option value="">-</option>{% for d in depts %}<option value="{{ d.id }}" {{ 'selected' if edit and edit.department_id==d.id }}>{{ d.name }}</option>{% endfor %}</select></label>
+    <label>직위<input name="position" value="{{ edit.position or '' if edit }}"></label>
+    <label>연락처<input name="phone" value="{{ edit.phone or '' if edit }}"></label>
+    <label>입사일<input type="date" name="hire_date" value="{{ edit.hire_date if edit }}" required></label>
+    <label>개별 출근시각 (비우면 회사 기본)<input type="time" name="work_start" value="{{ edit.work_start or '' if edit }}"></label>
+    <label>개별 퇴근시각<input type="time" name="work_end" value="{{ edit.work_end or '' if edit }}"></label>
+    {% if edit %}<label>재직상태<select name="active"><option value="1" {{ 'selected' if edit.active }}>재직</option><option value="0" {{ 'selected' if not edit.active }}>퇴사/비활성</option></select></label>{% endif %}
+    <div><button class="btn primary">{{ '저장' if edit else '등록' }}</button>{% if edit %} <a href="{{ url_for('admin_users') }}">취소</a>{% endif %}</div>
+  </form>
+  <form method="post" action="{{ url_for('add_department') }}" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input name="name" placeholder="새 부서명 (예: 설계팀, CM팀, 정비사업팀)"><button class="btn small">부서 추가</button>
+  </form>
+</section>
+<section class="card">
+  <h2>직원 목록 ({{ users|length }}명)</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>이름</th><th>아이디</th><th>부서/직위</th><th>권한</th><th>입사일</th><th>연차잔여</th><th>위치동의</th><th></th></tr></thead>
+    <tbody>{% for u in users %}
+    <tr class="{{ 'off' if not u.active }}">
+      <td>{{ u.name }}</td><td class="small">{{ u.login_id }}</td><td class="small">{{ u.dept or '' }} {{ u.position or '' }}</td>
+      <td>{{ ROLES[u.role] }}</td><td class="small">{{ u.hire_date }}</td><td>{{ '%g'|format(bals[u.id].remain) }}</td>
+      <td>{{ 'O' if u.location_consent else '-' }}</td>
+      <td class="row"><a href="?edit={{ u.id }}">수정</a>
+        <form method="post" action="{{ url_for('reset_password', uid=u.id) }}" onsubmit="return confirm('비밀번호를 초기화할까요?')">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="link">PW초기화</button></form></td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

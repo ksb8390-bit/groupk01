@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <h1>회사 설정</h1>
+  <form method="post" class="formgrid">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="company">
+    <label>회사명<input name="company_name" value="{{ s.company_name }}"></label>
+    <label>기본 출근시각<input type="time" name="work_start" value="{{ s.work_start }}"></label>
+    <label>기본 퇴근시각<input type="time" name="work_end" value="{{ s.work_end }}"></label>
+    <label>휴게시간(분)<input type="number" name="break_min" value="{{ s.break_min }}"></label>
+    <label>지각 유예(분)<input type="number" name="late_grace_min" value="{{ s.late_grace_min }}"></label>
+    <label class="check"><input type="checkbox" name="require_location" {{ 'checked' if s.require_location=='1' }}> '사무실' 출근은 근무지 반경 내에서만 허용</label>
+    <div><button class="btn primary">저장</button></div>
+  </form>
+</section>
+<section class="card">
+  <h2>근무지 (위치 확인 기준)</h2>
+  <ul class="list">{% for w in workplaces %}<li>{{ w.name }} <small class="muted">{{ w.lat }}, {{ w.lon }} · 반경 {{ w.radius_m }}m</small>
+    <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_del"><input type="hidden" name="id" value="{{ w.id }}"><button class="link">삭제</button></form></li>{% endfor %}</ul>
+  <form method="post" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_add">
+    <input name="name" placeholder="근무지명 (본사, ○○현장)" required>
+    <input name="lat" placeholder="위도 33.xxx" required><input name="lon" placeholder="경도 126.xxx" required>
+    <input name="radius_m" type="number" value="200" style="width:6em"> m
+    <button type="button" class="btn small" id="here">현재위치</button>
+    <button class="btn primary small">추가</button>
+  </form>
+</section>
+<section class="card">
+  <h2>휴일 (공휴일·회사휴무)</h2>
+  <p class="small muted">등록된 휴일은 연차 사용일수 계산에서 제외됩니다. 매년 초 관공서 공휴일·대체공휴일·임시공휴일을 등록하세요.</p>
+  <ul class="list small">{% for h in holidays %}<li>{{ h.day }} {{ h.name }}
+    <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="holiday_del"><input type="hidden" name="day" value="{{ h.day }}"><button class="link">삭제</button></form></li>{% endfor %}</ul>
+  <form method="post" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="holiday_add">
+    <input type="date" name="day" required><input name="name" placeholder="명칭" required><button class="btn primary small">추가</button>
+  </form>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+document.getElementById('here').onclick = () => navigator.geolocation.getCurrentPosition(p => {
+  document.querySelector('[name=lat]').value = p.coords.latitude.toFixed(6);
+  document.querySelector('[name=lon]').value = p.coords.longitude.toFixed(6);
+}, e => alert('위치를 가져오지 못했습니다: ' + e.message));
+</script>
+{% endblock %}

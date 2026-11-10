@@ -1,2 +1,4 @@
 requests
 openpyxl
+flask>=3.0
+pytest

@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <div class="row between"><h1>결재</h1>
+    <div class="tabs">{% for k in ('pending','approved','rejected','canceled') %}<a href="?status={{k}}" class="{{ 'on' if status==k }}">{{ STATUS[k] }}</a>{% endfor %}</div></div>
+  {% for r in rows %}
+  <div class="req">
+    <div><b>{{ r.name }}</b> <small class="muted">{{ r.dept or '' }}</small> · <b>{{ KIND[r.kind] }}</b>{% if r.unit in UNIT and r.unit!='full' %} ({{ UNIT[r.unit] }}){% endif %}</div>
+    <div class="small">{{ r.start_date }}{% if r.end_date!=r.start_date %} ~ {{ r.end_date }}{% endif %}
+      {% if r.days %} · {{ '%g'|format(r.days) }}일{% endif %}{% if r.minutes %} · {{ hm(r.minutes) }}{% endif %}
+      {% if r.kind=='correction' %} · 정정 {{ r.corr_in or '-' }} ~ {{ r.corr_out or '-' }}{% endif %}</div>
+    {% if r.reason %}<div class="small muted pre">{{ r.reason }}</div>{% endif %}
+    {% if r.status=='pending' %}
+    <form method="post" action="{{ url_for('decide', rid=r.id) }}" class="row">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <input name="note" placeholder="의견(선택)">
+      <button name="decision" value="approved" class="btn primary small">승인</button>
+      <button name="decision" value="rejected" class="btn small">반려</button>
+    </form>
+    {% else %}<div class="small"><span class="st {{ r.status }}">{{ STATUS[r.status] }}</span> {{ r.decided_at or '' }} {{ r.decision_note or '' }}</div>{% endif %}
+  </div>
+  {% else %}<p class="muted">해당 내역이 없습니다.</p>{% endfor %}
+</section>
+{% endblock %}
