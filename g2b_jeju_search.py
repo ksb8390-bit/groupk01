@@ -42,6 +42,10 @@ except ImportError:
 # 1. 설정값 (여기를 수정하세요)
 # =========================
 SERVICE_KEY = os.environ.get("G2B_SERVICE_KEY", "").strip()
+# Encoding 키(%2F, %3D 등 포함)를 넣은 경우 자동으로 Decoding 키로 변환 (requests가 다시 인코딩하므로 이중 인코딩 방지)
+if "%" in SERVICE_KEY:
+    from urllib.parse import unquote
+    SERVICE_KEY = unquote(SERVICE_KEY)
 
 BASE_URL = "https://apis.data.go.kr/1230000/ad/BidPublicInfoService/getBidPblancListInfoServcPPSSrch"
 
@@ -134,7 +138,27 @@ def normalize_row(item):
 # 3. 메인 수집 로직
 # =========================
 
+CHUNK_DAYS = 7                # API 1회 조회 기간 제한(초과 시 resultCode 07) 대응 - 7일 단위로 분할 조회
+
+
+def split_period(start, end, days=CHUNK_DAYS):
+    fmt = "%Y%m%d%H%M"
+    cur, last = datetime.strptime(start, fmt), datetime.strptime(end, fmt)
+    while cur <= last:
+        nxt = min(cur + timedelta(days=days) - timedelta(minutes=1), last)
+        yield cur.strftime(fmt), nxt.strftime(fmt)
+        cur = nxt + timedelta(minutes=1)
+
+
 def fetch_all():
+    all_items = []
+    for bgn, end in split_period(START_DATE, END_DATE):
+        print(f"### 구간 {bgn} ~ {end}")
+        all_items.extend(fetch_period(bgn, end))
+    return all_items
+
+
+def fetch_period(bgn, end):
     all_items = []
     page = 1
     total_count = None
@@ -145,8 +169,8 @@ def fetch_all():
             "pageNo": page,
             "numOfRows": NUM_OF_ROWS,
             "inqryDiv": 1,
-            "inqryBgnDt": START_DATE,
-            "inqryEndDt": END_DATE,
+            "inqryBgnDt": bgn,
+            "inqryEndDt": end,
             "type": "json",
         }
 
