@@ -56,10 +56,11 @@ END_DATE = None
 NUM_OF_ROWS = 100             # 페이지당 건수 (최대 100 권장)
 
 # 공고명(bidNtceNm)에 이 키워드 중 하나라도 포함되면 후보로 채택
-SUBJECT_KEYWORDS = ["건축설계", "설계용역", "건설사업관리", "CM용역", "안전진단", "정밀안전진단", "정밀점검"]
+SUBJECT_KEYWORDS = ["건축설계", "설계용역", "실시설계", "세부설계", "기본설계", "건설사업관리", "CM용역", "감리",
+                    "안전진단", "정밀안전진단", "정밀점검", "안전점검", "리모델링"]
 
 # 수요기관명(dminsttNm) 또는 공고기관명(ntceInsttNm)에 이 키워드가 포함되면 제주 관련으로 채택
-REGION_KEYWORDS = ["제주"]
+REGION_KEYWORDS = ["제주", "서귀포"]
 
 REQUEST_DELAY_SEC = 0.3       # 호출 간 대기시간 (초당 호출 제한 방지)
 
@@ -115,7 +116,7 @@ def is_match(item):
     inst2 = str(get_first(item, ["ntceInsttNm", "공고기관명", "공고기관"]))
 
     subject_hit = any(kw in subject for kw in SUBJECT_KEYWORDS)
-    region_hit = any(kw in inst1 or kw in inst2 for kw in REGION_KEYWORDS)
+    region_hit = any(kw in inst1 or kw in inst2 or kw in subject for kw in REGION_KEYWORDS)
     return subject_hit and region_hit
 
 
