@@ -4,20 +4,31 @@
 
 사용 전 준비:
 1. pip install requests openpyxl --break-system-packages   (또는 그냥 pip install requests openpyxl)
-2. 아래 SERVICE_KEY 에 data.go.kr에서 발급받은 "Decoding" 인증키를 넣으세요.
+2. data.go.kr에서 발급받은 "Decoding" 인증키를 환경변수 G2B_SERVICE_KEY 로 설정하세요.
    (마이페이지 > 개발계정 상세보기 > 일반 인증키(Decoding) 값)
-3. 조회 기간(START_DATE, END_DATE)을 원하는 범위로 수정하세요. (형식: YYYYMMDDHHMM)
+   - Linux/macOS : export G2B_SERVICE_KEY="발급키"
+   - Windows     : set G2B_SERVICE_KEY=발급키
+   ※ 키를 스크립트에 직접 적어 커밋하지 마세요.
+3. 조회 기간은 기본값으로 "오늘 기준 최근 7일"이 자동 적용됩니다.
 
 실행:
-    python g2b_jeju_search.py
+    python g2b_jeju_search.py                      # 최근 7일
+    python g2b_jeju_search.py --days 30            # 최근 30일
+    python g2b_jeju_search.py --start 20261101 --end 20261110   # 기간 직접 지정 (YYYYMMDD 또는 YYYYMMDDHHMM)
+
+참고: API 1회 조회 기간은 최대 1개월 이내로 제한될 수 있습니다(확인 필요). 긴 기간은 나누어 조회하세요.
 
 결과:
     - jeju_filtered.xlsx  : 제주 + 건축설계/CM/안전진단 키워드가 걸린 공고만
     - all_raw.csv         : 조회 기간 전체 원본 데이터 (백업/재검토용)
 """
 
-import time
+import argparse
 import csv
+import os
+import time
+from datetime import datetime, timedelta
+
 import requests
 
 try:
@@ -30,12 +41,13 @@ except ImportError:
 # =========================
 # 1. 설정값 (여기를 수정하세요)
 # =========================
-SERVICE_KEY = "여기에_Decoding_인증키를_붙여넣으세요"
+SERVICE_KEY = os.environ.get("G2B_SERVICE_KEY", "").strip()
 
 BASE_URL = "https://apis.data.go.kr/1230000/ad/BidPublicInfoService/getBidPblancListInfoServcPPSSrch"
 
-START_DATE = "202607270000"   # 조회 시작일시 (YYYYMMDDHHMM)
-END_DATE   = "202608022359"   # 조회 종료일시 (YYYYMMDDHHMM)
+DEFAULT_DAYS = 7              # 기간 미지정 시 오늘 기준 최근 N일 조회
+START_DATE = None             # main()에서 명령행 인자 또는 기본값으로 설정 (YYYYMMDDHHMM)
+END_DATE = None
 
 NUM_OF_ROWS = 100             # 페이지당 건수 (최대 100 권장)
 
@@ -210,10 +222,40 @@ def save_filtered(items, path):
     print(f"필터링 결과 저장 완료: {path} ({len(filtered)}건)")
 
 
+def _norm_dt(value, end=False):
+    """YYYYMMDD 또는 YYYYMMDDHHMM 을 YYYYMMDDHHMM 으로 정규화"""
+    value = value.strip()
+    if len(value) == 8 and value.isdigit():
+        return value + ("2359" if end else "0000")
+    if len(value) == 12 and value.isdigit():
+        return value
+    raise argparse.ArgumentTypeError(f"날짜 형식 오류: {value} (YYYYMMDD 또는 YYYYMMDDHHMM)")
+
+
+def resolve_period(args):
+    if args.start or args.end:
+        if not (args.start and args.end):
+            raise SystemExit("오류: --start 와 --end 는 함께 지정하세요.")
+        return _norm_dt(args.start), _norm_dt(args.end, end=True)
+    now = datetime.now()
+    begin = (now - timedelta(days=args.days)).replace(hour=0, minute=0)
+    return begin.strftime("%Y%m%d%H%M"), now.strftime("%Y%m%d%H%M")
+
+
 def main():
-    if SERVICE_KEY.startswith("여기에"):
-        print("오류: SERVICE_KEY를 먼저 설정하세요 (스크립트 상단 SERVICE_KEY 변수).")
+    global START_DATE, END_DATE
+
+    parser = argparse.ArgumentParser(description="나라장터 제주 건축설계/CM/안전진단 용역 공고 수집")
+    parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="오늘 기준 최근 N일 (기본 7)")
+    parser.add_argument("--start", help="조회 시작 (YYYYMMDD 또는 YYYYMMDDHHMM)")
+    parser.add_argument("--end", help="조회 종료 (YYYYMMDD 또는 YYYYMMDDHHMM)")
+    args = parser.parse_args()
+
+    if not SERVICE_KEY:
+        print("오류: 환경변수 G2B_SERVICE_KEY 에 data.go.kr 인증키(Decoding)를 설정하세요.")
         return
+
+    START_DATE, END_DATE = resolve_period(args)
 
     print(f"조회 기간: {START_DATE} ~ {END_DATE}")
     print(f"공고명 키워드: {SUBJECT_KEYWORDS}")
