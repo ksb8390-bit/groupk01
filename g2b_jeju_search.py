@@ -150,12 +150,32 @@ def fetch_all():
             "type": "json",
         }
 
-        resp = requests.get(BASE_URL, params=params, timeout=30)
+        resp = None
+        for attempt in range(1, 5):
+            try:
+                resp = requests.get(BASE_URL, params=params, timeout=60)
+                break
+            except requests.exceptions.RequestException as e:
+                wait = 2 ** attempt
+                print(f"[페이지 {page}] 연결 실패({attempt}/4): {e.__class__.__name__} - {wait}초 후 재시도")
+                time.sleep(wait)
+        if resp is None:
+            print(f"[페이지 {page}] 연결 재시도 모두 실패. 수집 중단.")
+            break
 
         try:
             data = resp.json()
         except ValueError:
             print(f"[페이지 {page}] JSON 파싱 실패. 응답 일부: {resp.text[:300]}")
+            break
+
+        err = data.get("OpenAPI_ServiceResponse", {}).get("cmmMsgHeader") if isinstance(data, dict) else None
+        if err:
+            print(f"[API 오류] {err.get('errMsg')} / {err.get('returnAuthMsg')} (코드 {err.get('returnReasonCode')})")
+            break
+        header = data.get("response", {}).get("header", {}) if isinstance(data, dict) else {}
+        if header and str(header.get("resultCode", "00")) != "00":
+            print(f"[API 오류] {header.get('resultCode')} {header.get('resultMsg')}")
             break
 
         items, total = extract_items(data)
