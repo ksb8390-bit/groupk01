@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f3a5f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ company }} 근태">
+<link rel="manifest" href="{{ url_for('manifest') }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
+<link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<title>{% block title %}{{ company }} 근태관리{% endblock %}</title>
+</head>
+<body>
+<header class="top">
+  <a href="{{ url_for('home') }}" class="brand">{{ company }} <span>근태</span></a>
+  {% if me %}
+  <div class="who">{{ me.name }}{% if me.dept %} · {{ me.dept }}{% endif %}
+    <form method="post" action="{{ url_for('logout') }}" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <button class="link">로그아웃</button>
+    </form>
+  </div>
+  {% endif %}
+</header>
+{% if me and me.role in ('admin','manager') %}
+<nav class="adminnav">
+  <a href="{{ url_for('admin_home') }}">현황</a>
+  <a href="{{ url_for('approvals') }}">결재</a>
+  <a href="{{ url_for('admin_attendance') }}">월간근태</a>
+  {% if me.role == 'admin' %}
+  <a href="{{ url_for('admin_users') }}">직원</a>
+  <a href="{{ url_for('admin_leave') }}">연차</a>
+  <a href="{{ url_for('admin_settings') }}">설정</a>
+  <a href="{{ url_for('audit_view') }}">이력</a>
+  {% endif %}
+</nav>
+{% endif %}
+<main>
+  {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
+  {% block body %}{% endblock %}
+</main>
+{% if me %}
+<nav class="bottom">
+  <a href="{{ url_for('home') }}" class="{{ 'on' if request.endpoint=='home' }}"><b>⏱</b>출퇴근</a>
+  <a href="{{ url_for('my_attendance') }}" class="{{ 'on' if request.endpoint=='my_attendance' }}"><b>📅</b>내 근태</a>
+  <a href="{{ url_for('my_requests') }}" class="{{ 'on' if request.endpoint=='my_requests' }}"><b>📝</b>휴가·신청</a>
+  <a href="{{ url_for('notices') }}" class="{{ 'on' if request.endpoint=='notices' }}"><b>📢</b>공지</a>
+  {% if me.role in ('admin','manager') %}<a href="{{ url_for('admin_home') }}" class="{{ 'on' if request.endpoint and request.endpoint.startswith('admin') }}"><b>👥</b>관리</a>{% endif %}
+</nav>
+{% endif %}
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('{{ url_for("service_worker") }}');
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

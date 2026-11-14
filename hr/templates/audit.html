@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <h1>변경 이력</h1>
+  <div class="tablewrap"><table>
+    <thead><tr><th>일시</th><th>처리자</th><th>작업</th><th>대상</th><th>내용</th></tr></thead>
+    <tbody>{% for a in rows %}<tr><td class="small">{{ a.created_at }}</td><td>{{ a.name or '' }}</td><td class="small">{{ a.action }}</td><td class="small">{{ a.target }}</td><td class="small">{{ a.detail }}</td></tr>{% endfor %}</tbody>
+  </table></div>
+</section>
+{% endblock %}

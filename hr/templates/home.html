@@ -1,0 +1,96 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card clock">
+  <div class="date">{{ today.strftime('%Y.%m.%d') }} ({{ '월화수목금토일'[today.weekday()] }})</div>
+  <div class="now" id="now">--:--:--</div>
+  <div class="muted small">소정근로 {{ sched[0] }} ~ {{ sched[1] }}</div>
+  {% if on_leave %}<div class="badge leave">오늘 {{ KIND[on_leave.kind] }}{% if on_leave.unit!='full' %}({{ UNIT[on_leave.unit] }}){% endif %}</div>{% endif %}
+
+  <div class="stamps">
+    <div><span>출근</span><b>{{ rec.check_in|time if rec else '-' }}</b>
+      {% if rec and rec.late_min %}<em class="late">지각 {{ rec.late_min }}분</em>{% endif %}
+      {% if rec and rec.in_place %}<em>{{ rec.in_place }}</em>{% endif %}</div>
+    <div><span>퇴근</span><b>{{ rec.check_out|time if rec else '-' }}</b>
+      {% if rec and rec.out_place %}<em>{{ rec.out_place }}</em>{% endif %}</div>
+  </div>
+
+  <form method="post" action="{{ url_for('punch') }}" id="punchForm">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="lat"><input type="hidden" name="lon">
+    <input type="hidden" name="action">
+    {% if not rec or not rec.check_in %}
+    <div class="seg">
+      {% for k, v in WORK_TYPES.items() %}
+      <label><input type="radio" name="work_type" value="{{ k }}" {{ 'checked' if k=='office' }}><span>{{ v }}</span></label>
+      {% endfor %}
+    </div>
+    <input name="note" placeholder="메모 (현장명 등, 선택)">
+    <button type="button" class="btn primary big" data-action="in">출근하기</button>
+    {% else %}
+    <button type="button" class="btn dark big" data-action="out">{{ '퇴근 시각 갱신' if rec.check_out else '퇴근하기' }}</button>
+    {% endif %}
+  </form>
+  <p class="muted small" id="geoMsg">
+    {% if consent %}위치 확인 후 기록됩니다.{% else %}위치 수집에 동의하지 않아 시각·IP만 기록됩니다.{% endif %}
+    {% if require_location %} (사무실 출근은 근무지 반경 내에서만 가능){% endif %}
+  </p>
+</section>
+
+<section class="grid2">
+  <div class="card stat">
+    <span>이번 주 근로시간</span>
+    <b class="{{ 'warn' if week_min > 48*60 }}">{{ hm(week_min) }}</b>
+    <div class="bar"><i style="width: {{ [week_min*100//week_limit,100]|min }}%"></i></div>
+    <small class="muted">한도 52:00 (기본 40 + 연장 12)</small>
+  </div>
+  <div class="card stat">
+    <span>연차 잔여</span>
+    <b>{{ '%g'|format(bal.remain) }}<small>일</small></b>
+    <small>대체휴가 잔여 <b>{{ '%g'|format(comp.remain) }}</b>일</small>
+    <small class="muted">{{ bal.kind }} · 발생 {{ '%g'|format(bal.total) }} / 사용 {{ '%g'|format(bal.used) }}{% if bal.pending %} / 대기 {{ '%g'|format(bal.pending) }}{% endif %}</small>
+  </div>
+</section>
+
+{% if not consent %}
+<section class="card">
+  <h2>위치정보 수집 동의 (선택)</h2>
+  <p class="small">출퇴근 버튼을 누르는 시점에 한해 단말기 위치(위도·경도)를 수집하여 근무지 확인에 사용하며, 근태기록 보존기간 동안 보관합니다. 동의하지 않아도 출퇴근 기록은 가능합니다. 언제든 철회할 수 있습니다.</p>
+  <form method="post" action="{{ url_for('consent') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="agree" value="1">
+    <button class="btn">동의합니다</button>
+  </form>
+</section>
+{% else %}
+<form method="post" action="{{ url_for('consent') }}" class="right small">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="agree" value="0">
+  <button class="link">위치수집 동의 철회</button>
+</form>
+{% endif %}
+
+{% if notices %}
+<section class="card">
+  <h2>공지사항</h2>
+  <ul class="list">{% for n in notices %}<li><a href="{{ url_for('notices') }}#n{{ n.id }}">{{ n.title }}</a><small class="muted">{{ n.created_at[:10] }}</small></li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% endblock %}
+{% block script %}
+<script>
+const consent = {{ 'true' if consent else 'false' }};
+const p2 = n => String(n).padStart(2, '0');
+function tick(){ const k = new Date(Date.now() + 9*3600e3);  // KST(UTC+9) 고정 — 단말 시간대와 무관
+  document.getElementById('now').textContent = p2(k.getUTCHours())+':'+p2(k.getUTCMinutes())+':'+p2(k.getUTCSeconds()); }
+tick(); setInterval(tick, 1000);
+const f = document.getElementById('punchForm');
+document.querySelectorAll('[data-action]').forEach(b => b.addEventListener('click', () => {
+  f.action.value = b.dataset.action;
+  b.disabled = true;
+  const send = () => f.submit();
+  if (!consent || !navigator.geolocation) return send();
+  document.getElementById('geoMsg').textContent = '위치 확인 중...';
+  navigator.geolocation.getCurrentPosition(p => {
+    f.lat.value = p.coords.latitude; f.lon.value = p.coords.longitude; send();
+  }, () => send(), {enableHighAccuracy: true, timeout: 8000, maximumAge: 30000});
+}));
+</script>
+{% endblock %}
