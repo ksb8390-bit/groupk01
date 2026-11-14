@@ -27,7 +27,7 @@ timedatectl set-timezone Asia/Seoul || ln -sf /usr/share/zoneinfo/Asia/Seoul /et
 step "2/8 패키지 설치"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y python3 python3-venv python3-pip sqlite3 ufw curl gnupg debian-keyring debian-archive-keyring apt-transport-https
+apt-get install -y python3 python3-venv python3-pip sqlite3 rsync ufw curl gnupg debian-keyring debian-archive-keyring apt-transport-https
 if ! apt-get install -y caddy 2>/dev/null; then
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
@@ -92,9 +92,10 @@ ufw allow 80/tcp >/dev/null
 ufw allow 443/tcp >/dev/null
 ufw --force enable
 
-step "8/8 일일 백업 03:00, 30일 보관"
+step "8/8 일일 백업 03:00 (DB 30일 보관 + 대화 사진 동기화)"
 cat > /etc/cron.d/groupk-hr-backup <<CRON
 0 3 * * * $APP_USER sqlite3 $DATA_DIR/hr.sqlite3 ".backup '$BACKUP_DIR/hr-\$(date +\%F).sqlite3'" && find $BACKUP_DIR -name 'hr-*.sqlite3' -mtime +30 -delete
+20 3 * * * $APP_USER mkdir -p $DATA_DIR/uploads && rsync -a $DATA_DIR/uploads/ $BACKUP_DIR/uploads/
 CRON
 chmod 644 /etc/cron.d/groupk-hr-backup
 

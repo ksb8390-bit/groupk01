@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+{% block title %}대화 · {{ company }}{% endblock %}
+{% block body %}
+<section class="card">
+  <div class="row between"><h1>내 상태</h1>
+    <small class="muted">{% if mine %}{{ ICON[mine.status] }} {{ STATUS[mine.status] }}{% if mine.place %} · {{ mine.place }}{% endif %}{% if mine.eta %} · 복귀 {{ mine.eta }}{% endif %} <span>({{ mine.updated_at[5:16] }})</span>{% else %}아직 설정하지 않음{% endif %}</small></div>
+  <form method="post" action="{{ url_for('chat.update_status') }}" id="statusForm">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="lat"><input type="hidden" name="lon">
+    <div class="chip-row">
+      {% for k, v in STATUS.items() %}<label><input type="radio" name="status" value="{{ k }}" {{ 'checked' if (mine and mine.status==k) or (not mine and k=='office') }}><span>{{ ICON[k] }} {{ v }}</span></label>{% endfor %}
+    </div>
+    <div class="row">
+      <label>장소<input name="place" maxlength="60" placeholder="예: 제주시청, ○○현장" value="{{ mine.place or '' if mine }}"></label>
+      <label>복귀 예정<input type="time" name="eta" value="{{ mine.eta or '' if mine }}"></label>
+    </div>
+    <label>업무 내용<input name="note" maxlength="300" placeholder="예: 건축과 협의, 골조 검측"></label>
+    <div class="row">
+      <label>알릴 대화방<select name="room_id"><option value="">알리지 않음</option>{% for x in rooms %}<option value="{{ x.room.id }}" {{ 'selected' if loop.first }}>{{ x.room.name }}</option>{% endfor %}</select></label>
+      <label class="check"><input type="checkbox" id="withLoc"> 현재 위치 함께 보내기</label>
+    </div>
+    <button class="btn primary wide">상태 변경</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="row between"><h2>대화방</h2><a class="small" href="{{ url_for('notices') }}">📢 공지사항</a></div>
+  <div class="rooms">
+    {% for x in rooms %}
+    <a class="room" href="{{ url_for('chat.room', rid=x.room.id) }}">
+      <span class="ic">{{ '🏢' if x.room.kind=='all' else '💬' }}</span>
+      <span class="tx"><b>{{ x.room.name }} <small style="display:inline">{{ x.members }}명</small></b>
+        <small>{% if x.last %}{% if x.last.deleted %}삭제된 메시지{% elif x.last.kind=='photo' %}{{ x.last.name }}: 📷 사진{% elif x.last.kind=='location' %}{{ x.last.name }}: 📍 위치{% elif x.last.kind=='system' %}{{ x.last.body }}{% else %}{{ x.last.name ~ ': ' if x.last.name }}{{ x.last.body }}{% endif %}{% else %}{{ x.room.description or '대화를 시작해 보세요' }}{% endif %}</small></span>
+      {% if x.unread %}<span class="n">{{ x.unread }}</span>{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+  {% if can_create %}
+  <details style="margin-top:10px"><summary class="small">＋ 새 대화방 만들기 (본사, 현장 등)</summary>
+    <form method="post" action="{{ url_for('chat.create_room') }}" style="margin-top:8px">
+      <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+      <label>이름<input name="name" maxlength="40" placeholder="예: 본사대화방, ○○현장" required></label>
+      <label>설명<input name="description" maxlength="200" placeholder="선택"></label>
+      <p class="small muted">참여자 (본인은 자동 포함)</p>
+      <div class="chip-row">{% for u in users %}<label><input type="checkbox" name="members" value="{{ u.id }}"><span>{{ u.name }}{% if u.dept %} · {{ u.dept }}{% endif %}</span></label>{% endfor %}</div>
+      <button class="btn primary">만들기</button>
+    </form>
+  </details>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>오늘 직원 현황</h2>
+  <div class="board">
+    {% for b in board %}
+    <div class="p"><b>{{ b.r.name }}</b><small>{{ b.r.dept or '' }} {{ b.r.position or '' }}</small>
+      {% if b.status %}<span class="s {{ b.status }}">{{ ICON[b.status] }} {{ STATUS[b.status] }}</span>
+        {% if b.r.place %}<small>{{ b.r.place }}</small>{% endif %}
+        {% if b.r.eta and b.status not in ('office','off') %}<small>복귀 {{ b.r.eta }}</small>{% endif %}
+        <small>{{ b.r.updated_at[11:16] }} 갱신</small>
+      {% else %}<span class="s">미확인</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <p class="small muted">출근 버튼을 누르면 근무유형(사무실·현장 등)으로 자동 표시되고, 퇴근하면 '퇴근'으로 바뀝니다.</p>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+const sf = document.getElementById('statusForm');
+sf.addEventListener('submit', ev => {
+  if (!document.getElementById('withLoc').checked || sf.dataset.ready) return;
+  ev.preventDefault();
+  const go = () => { sf.dataset.ready = 1; sf.submit(); };
+  if (!navigator.geolocation) return go();
+  navigator.geolocation.getCurrentPosition(p => { sf.lat.value = p.coords.latitude; sf.lon.value = p.coords.longitude; go(); },
+    () => { alert('위치를 가져오지 못해 위치 없이 보냅니다.'); go(); }, {enableHighAccuracy: true, timeout: 8000});
+});
+</script>
+{% endblock %}

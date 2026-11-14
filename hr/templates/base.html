@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1f3a5f">
+{% if me %}<meta name="csrf" content="{{ csrf_token() }}">{% endif %}
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="{{ company }} 근태">
 <link rel="manifest" href="{{ url_for('manifest') }}">
@@ -12,7 +13,7 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <title>{% block title %}{{ company }} 근태관리{% endblock %}</title>
 </head>
-<body>
+<body class="{% block bodyclass %}{% endblock %}">
 <header class="top">
   <a href="{{ url_for('home') }}" class="brand">{{ company }} <span>근태</span></a>
   {% if me %}
@@ -41,17 +42,25 @@
   {% with msgs = get_flashed_messages() %}{% for m in msgs %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
   {% block body %}{% endblock %}
 </main>
-{% if me %}
+{% if me %}{% block bottomnav %}
 <nav class="bottom">
   <a href="{{ url_for('home') }}" class="{{ 'on' if request.endpoint=='home' }}"><b>⏱</b>출퇴근</a>
   <a href="{{ url_for('my_attendance') }}" class="{{ 'on' if request.endpoint=='my_attendance' }}"><b>📅</b>내 근태</a>
   <a href="{{ url_for('my_requests') }}" class="{{ 'on' if request.endpoint=='my_requests' }}"><b>📝</b>휴가·신청</a>
-  <a href="{{ url_for('notices') }}" class="{{ 'on' if request.endpoint=='notices' }}"><b>📢</b>공지</a>
+  <a href="{{ url_for('chat.index') }}" class="{{ 'on' if request.endpoint and (request.endpoint.startswith('chat.') or request.endpoint=='notices') }}"><b>💬<i class="badge-n" id="unreadBadge" hidden></i></b>대화</a>
   {% if me.role in ('admin','manager') %}<a href="{{ url_for('admin_home') }}" class="{{ 'on' if request.endpoint and request.endpoint.startswith('admin') }}"><b>👥</b>관리</a>{% endif %}
 </nav>
-{% endif %}
+{% endblock %}{% endif %}
 <script>
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('{{ url_for("service_worker") }}');
+{% if me %}
+(function(){
+  const b = document.getElementById('unreadBadge'); if (!b) return;
+  const tick = () => fetch('{{ url_for("chat.unread") }}', {credentials: 'same-origin'}).then(r => r.ok ? r.json() : null)
+    .then(d => { if (!d) return; b.hidden = !d.unread; b.textContent = d.unread > 99 ? '99+' : d.unread; }).catch(() => {});
+  tick(); setInterval(() => { if (!document.hidden) tick(); }, 20000);
+})();
+{% endif %}
 </script>
 {% block script %}{% endblock %}
 </body>

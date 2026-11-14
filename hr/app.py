@@ -17,7 +17,7 @@ from functools import wraps
 from zoneinfo import ZoneInfo
 
 import click
-from flask import (Flask, abort, flash, g, redirect, render_template, request,
+from flask import (Flask, abort, flash, g, jsonify, redirect, render_template, request,
                    send_file, session, url_for)
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -74,6 +74,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     _register_cli(app)
     _register_filters(app)
     _register_routes(app)
+    from . import chat
+    chat.register(app)
     return app
 
 
@@ -352,6 +354,12 @@ def _register_filters(app: Flask):
     def _time(s):
         return s[11:16] if s else "-"
 
+    @app.errorhandler(413)
+    def too_large(_e):
+        if request.path.startswith("/chat/"):
+            return jsonify({"error": "파일이 너무 큽니다(최대 10MB)."}), 413
+        return render_template("error.html", title="파일이 너무 큽니다", message="최대 10MB까지 올릴 수 있습니다."), 413
+
     @app.errorhandler(400)
     @app.errorhandler(403)
     @app.errorhandler(404)
@@ -519,6 +527,9 @@ def _register_routes(app: Flask):
                 "note=COALESCE(excluded.note, attendance.note) WHERE attendance.check_in IS NULL",
                 (me["id"], t, stamp, lat, lon, place, ip, work_type, late,
                  request.form.get("note") or None))
+            from .chat import WORK_TYPE_TO_STATUS, set_status
+            set_status(me["id"], WORK_TYPE_TO_STATUS.get(work_type, "office"),
+                       place or (request.form.get("note") or None))
             flash(f"출근 {n:%H:%M}" + (f" (지각 {late}분)" if late else ""))
         elif action == "out":
             if not rec or not rec["check_in"]:
@@ -531,6 +542,8 @@ def _register_routes(app: Flask):
                     return redirect(url_for("home"))
             db.execute("UPDATE attendance SET check_out=?, out_lat=?, out_lon=?, out_place=?, out_ip=? "
                        "WHERE id=?", (stamp, lat, lon, place, ip, rec["id"]))
+            from .chat import set_status
+            set_status(me["id"], "off")
             flash(f"퇴근 {n:%H:%M}" + (" (퇴근 시각 갱신)" if rec["check_out"] else ""))
         else:
             abort(400)

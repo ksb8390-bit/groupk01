@@ -107,6 +107,47 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS ix_att_date ON attendance(work_date);
 CREATE INDEX IF NOT EXISTS ix_req_user ON requests(user_id, status);
+
+-- ---------- 대화(메신저)
+CREATE TABLE IF NOT EXISTS chat_rooms (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'custom',     -- all(전 직원 자동 참여) / custom
+    description TEXT,
+    created_by INTEGER REFERENCES users(id),
+    archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS chat_members (
+    room_id INTEGER NOT NULL REFERENCES chat_rooms(id),
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    last_read_id INTEGER NOT NULL DEFAULT 0,
+    joined_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (room_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id INTEGER PRIMARY KEY,
+    room_id INTEGER NOT NULL REFERENCES chat_rooms(id),
+    user_id INTEGER REFERENCES users(id),
+    kind TEXT NOT NULL DEFAULT 'text',       -- text / status / location / photo / system
+    body TEXT,
+    lat REAL, lon REAL,
+    file_path TEXT,
+    deleted INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_chat_msg_room ON chat_messages(room_id, id);
+
+CREATE TABLE IF NOT EXISTS user_status (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    status TEXT NOT NULL,                    -- office / visit / outside / field / trip / remote / leave / off
+    place TEXT,
+    eta TEXT,                                -- 복귀 예정 HH:MM
+    note TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 DEFAULT_SETTINGS = {
@@ -140,6 +181,9 @@ def init_db():
     db.executescript(SCHEMA)
     for k, v in DEFAULT_SETTINGS.items():
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
+    if not db.execute("SELECT 1 FROM chat_rooms WHERE kind='all'").fetchone():
+        db.execute("INSERT INTO chat_rooms(name, kind, description) VALUES "
+                   "('전체대화방', 'all', '전 직원이 자동으로 참여하는 대화방')")
     db.commit()
 
 
