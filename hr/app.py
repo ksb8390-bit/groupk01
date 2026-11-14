@@ -71,14 +71,19 @@ def create_app(test_config: dict | None = None) -> Flask:
 
 def _load_or_create_secret(instance_path: str) -> str:
     path = os.path.join(instance_path, "secret_key")
-    if os.path.exists(path):
-        with open(path) as f:
-            return f.read().strip()
     key = secrets.token_hex(32)
-    with open(path, "w") as f:
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
         f.write(key)
-    os.chmod(path, 0o600)
-    return key
+    os.chmod(tmp, 0o600)
+    try:
+        os.link(tmp, path)  # 원자적 생성: 여러 워커가 동시에 시작해도 하나의 키만 채택
+    except FileExistsError:
+        pass
+    finally:
+        os.unlink(tmp)
+    with open(path) as f:
+        return f.read().strip()
 
 
 # ---------------------------------------------------------------- helpers
