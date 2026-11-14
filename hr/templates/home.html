@@ -46,6 +46,7 @@
   <div class="card stat">
     <span>연차 잔여</span>
     <b>{{ '%g'|format(bal.remain) }}<small>일</small></b>
+    <small>대체휴가 잔여 <b>{{ '%g'|format(comp.remain) }}</b>일</small>
     <small class="muted">{{ bal.kind }} · 발생 {{ '%g'|format(bal.total) }} / 사용 {{ '%g'|format(bal.used) }}{% if bal.pending %} / 대기 {{ '%g'|format(bal.pending) }}{% endif %}</small>
   </div>
 </section>

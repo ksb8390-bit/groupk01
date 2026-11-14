@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS attendance (
 CREATE TABLE IF NOT EXISTS requests (
     id INTEGER PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
-    kind TEXT NOT NULL,          -- annual / sick / family / official / overtime / correction ...
+    kind TEXT NOT NULL,          -- annual / comp / holiday_work / overtime / correction ...
     unit TEXT NOT NULL DEFAULT 'full',   -- full / am / pm / quarter / hours
     start_date TEXT NOT NULL,
     end_date TEXT NOT NULL,
@@ -114,7 +114,8 @@ DEFAULT_SETTINGS = {
     "work_start": "09:00",
     "work_end": "18:00",
     "break_min": "60",
-    "late_grace_min": "0",
+    "late_grace_min": "10",    # 출근시각 + 10분까지는 지각 아님
+    "comp_ratio": "1",         # 휴일근무 1일당 대체휴가 적립 배율 (1 또는 1.5)
     "require_location": "0",   # 1이면 위치(근무지 반경) 확인 없이는 '사무실' 출근 불가
 }
 

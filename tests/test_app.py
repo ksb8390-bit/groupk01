@@ -48,14 +48,14 @@ def test_punch_flow_with_geofence(app):
     c = app.test_client()
     tok = login(c, "kim")
     c.post("/consent", data={"csrf": tok, "agree": "1"})
-    CLOCK["now"] = datetime(2026, 11, 10, 9, 5)
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 15)
     c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office", "lat": "33.4997", "lon": "126.5313"})
     CLOCK["now"] = datetime(2026, 11, 10, 18, 30)
     c.post("/punch", data={"csrf": tok, "action": "out", "lat": "33.4997", "lon": "126.5313"})
     with app.app_context():
         r = get_db().execute("SELECT * FROM attendance").fetchone()
-        assert r["late_min"] == 5 and r["in_place"] == "본사" and r["check_out"].endswith("18:30:00")
-    assert "8:25" in c.get("/").get_data(as_text=True)  # 9:05~18:30 - 1h
+        assert r["late_min"] == 15 and r["in_place"] == "본사" and r["check_out"].endswith("18:30:00")
+    assert "8:15" in c.get("/").get_data(as_text=True)  # 9:15~18:30 - 1h
 
 
 def test_require_location_blocks_office_outside(app):
@@ -146,3 +146,68 @@ def test_create_user_forces_password_change(app):
     tok = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
     p.post("/login", data={"login_id": "park", "password": "temp1234", "csrf": tok})
     assert "/password" in p.get("/").headers["Location"]
+
+
+def test_late_grace_default_10_minutes(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 10)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    with app.app_context():
+        assert get_db().execute("SELECT late_min FROM attendance").fetchone()["late_min"] == 0
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 5)
+
+
+def _approve_all(app):
+    a = app.test_client()
+    at = login(a, "admin")
+    with app.app_context():
+        ids = [r["id"] for r in get_db().execute("SELECT id FROM requests WHERE status='pending'").fetchall()]
+    for rid in ids:
+        a.post(f"/admin/requests/{rid}/decide", data={"csrf": at, "decision": "approved"})
+
+
+def test_holiday_work_accrues_comp_leave(app):
+    from hr.app import comp_balance, leave_balance
+    c = app.test_client()
+    tok = login(c, "kim")
+    # 평일(화)에는 휴일근무 신청 불가
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "full", "start_date": "2026-11-10"})
+    # 대체휴가 잔여 없이 사용 신청 불가
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "full", "start_date": "2026-11-16"})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) c FROM requests").fetchone()["c"] == 0
+    # 토요일 종일 + 일요일 반일 근무 → 1.5일 적립
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "full", "start_date": "2026-11-07",
+                              "reason": "현장 타설"})
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "half", "start_date": "2026-11-08"})
+    _approve_all(app)
+    # 2일 사용은 잔여 초과 → 거부, 1일 + 오전반차 사용은 가능
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "full",
+                              "start_date": "2026-11-16", "end_date": "2026-11-17"})
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "full", "start_date": "2026-11-16"})
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "am", "start_date": "2026-11-17"})
+    _approve_all(app)
+    with app.app_context():
+        u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        cb = comp_balance(u)
+        assert (cb["earned"], cb["used"], cb["remain"]) == (1.5, 1.5, 0)
+        assert leave_balance(u)["used"] == 0  # 연차와 별도
+    page = c.get("/requests").get_data(as_text=True)
+    assert "+1일 적립" in page and "대체휴가 잔여 <b>0일</b>" in page
+
+
+def test_holiday_work_on_registered_holiday_and_ratio(app):
+    from hr.app import comp_balance
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO holidays(day,name) VALUES ('2026-11-11','창립기념일')")
+        db.execute("UPDATE settings SET value='1.5' WHERE key='comp_ratio'")
+        db.commit()
+    c = app.test_client()
+    tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "full", "start_date": "2026-11-11"})
+    _approve_all(app)
+    with app.app_context():
+        u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        assert comp_balance(u)["earned"] == 1.5

@@ -5,9 +5,9 @@
     <div class="tabs">{% for k in ('pending','approved','rejected','canceled') %}<a href="?status={{k}}" class="{{ 'on' if status==k }}">{{ STATUS[k] }}</a>{% endfor %}</div></div>
   {% for r in rows %}
   <div class="req">
-    <div><b>{{ r.name }}</b> <small class="muted">{{ r.dept or '' }}</small> · <b>{{ KIND[r.kind] }}</b>{% if r.unit in UNIT and r.unit!='full' %} ({{ UNIT[r.unit] }}){% endif %}</div>
+    <div><b>{{ r.name }}</b> <small class="muted">{{ r.dept or '' }}</small> · <b>{{ KIND[r.kind] }}</b>{% if r.unit not in ('full','hours') %} ({{ ALL_UNITS[r.unit] }}){% endif %}</div>
     <div class="small">{{ r.start_date }}{% if r.end_date!=r.start_date %} ~ {{ r.end_date }}{% endif %}
-      {% if r.days %} · {{ '%g'|format(r.days) }}일{% endif %}{% if r.minutes %} · {{ hm(r.minutes) }}{% endif %}
+      {% if r.kind=='holiday_work' %} · 대체휴가 +{{ '%g'|format(r.days) }}일 적립{% elif r.days %} · {{ '%g'|format(r.days) }}일{% endif %}{% if r.minutes %} · {{ hm(r.minutes) }}{% endif %}
       {% if r.kind=='correction' %} · 정정 {{ r.corr_in or '-' }} ~ {{ r.corr_out or '-' }}{% endif %}</div>
     {% if r.reason %}<div class="small muted pre">{{ r.reason }}</div>{% endif %}
     {% if r.status=='pending' %}

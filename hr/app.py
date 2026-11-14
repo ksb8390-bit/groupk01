@@ -36,8 +36,9 @@ KIND_LABELS = {
     "sick": "병가",
     "family": "경조사",
     "official": "공가",
-    "comp": "대체휴무",
+    "comp": "대체휴가",
     "unpaid": "무급휴가",
+    "holiday_work": "휴일근무(대체휴가 적립)",
     "overtime": "연장근무",
     "field": "외근·출장",
     "correction": "근태정정",
@@ -45,6 +46,8 @@ KIND_LABELS = {
 LEAVE_KINDS = ("annual", "sick", "family", "official", "comp", "unpaid")
 DEDUCT_KINDS = ("annual",)
 UNIT_LABELS = {"full": "종일", "am": "오전반차", "pm": "오후반차", "quarter": "반반차"}
+HW_UNITS = {"full": "종일(8시간)", "half": "반일(4시간)"}   # 휴일근무 단위
+ALL_UNITS = {**UNIT_LABELS, "half": "반일", "hours": ""}
 STATUS_LABELS = {"pending": "대기", "approved": "승인", "rejected": "반려", "canceled": "취소"}
 WORK_TYPES = {"office": "사무실", "field": "현장", "remote": "재택", "trip": "출장"}
 ROLE_LABELS = {"admin": "관리자", "manager": "부서장", "employee": "직원"}
@@ -219,6 +222,26 @@ def leave_balance(user, on: date | None = None) -> dict:
             "remain": total - used}
 
 
+def comp_balance(user) -> dict:
+    """대체휴가: 승인된 휴일근무로 적립(earned), 승인된 대체휴가로 차감(used)."""
+    rows = get_db().execute(
+        "SELECT kind, status, COALESCE(SUM(days),0) s FROM requests WHERE user_id=? "
+        "AND kind IN ('holiday_work','comp') AND status IN ('approved','pending') GROUP BY kind, status",
+        (user["id"],)).fetchall()
+    v = {(r["kind"], r["status"]): r["s"] for r in rows}
+    earned = v.get(("holiday_work", "approved"), 0)
+    used = v.get(("comp", "approved"), 0)
+    return {"earned": earned, "used": used, "pending": v.get(("comp", "pending"), 0),
+            "earn_pending": v.get(("holiday_work", "pending"), 0), "remain": earned - used}
+
+
+def month_leave_days(user_id: int, first: date, last: date) -> float:
+    return get_db().execute(
+        "SELECT COALESCE(SUM(days),0) s FROM requests WHERE user_id=? AND status='approved' "
+        f"AND kind IN ({','.join('?' * len(LEAVE_KINDS))}) AND start_date BETWEEN ? AND ?",
+        (user_id, *LEAVE_KINDS, first.isoformat(), last.isoformat())).fetchone()["s"]
+
+
 def month_range(ym: str | None) -> tuple[date, date, str]:
     if ym:
         y, m = map(int, ym.split("-"))
@@ -265,7 +288,7 @@ def _register_filters(app: Flask):
         return {
             "me": current_user(),
             "csrf_token": _csrf_token,
-            "KIND": KIND_LABELS, "UNIT": UNIT_LABELS, "STATUS": STATUS_LABELS,
+            "KIND": KIND_LABELS, "UNIT": UNIT_LABELS, "ALL_UNITS": ALL_UNITS, "STATUS": STATUS_LABELS,
             "WORK_TYPES": WORK_TYPES, "ROLES": ROLE_LABELS,
             "company": setting("company_name"),
             "hm": rules.fmt_hm,
@@ -359,7 +382,7 @@ def _register_routes(app: Flask):
         ws, we = schedule_of(me)
         return render_template(
             "home.html", rec=rec, on_leave=on_leave, notices=notices, week_min=wk,
-            week_limit=rules.WEEKLY_LIMIT_MIN, bal=leave_balance(me), sched=(ws, we),
+            week_limit=rules.WEEKLY_LIMIT_MIN, bal=leave_balance(me), comp=comp_balance(me), sched=(ws, we),
             today=t, consent=me["location_consent"],
             require_location=setting("require_location") == "1")
 
@@ -452,7 +475,7 @@ def _register_routes(app: Flask):
             total += mins
             if rec and rec["late_min"]:
                 late_cnt += 1
-            labels = [KIND_LABELS[r["kind"]] + ("" if r["unit"] == "full" else f"({UNIT_LABELS.get(r['unit'], '')})")
+            labels = [KIND_LABELS[r["kind"]] + ("" if r["unit"] == "full" else f"({ALL_UNITS.get(r['unit'], '')})")
                       for r in reqs if r["start_date"] <= iso <= r["end_date"]]
             days.append({"date": d, "rec": rec, "minutes": mins, "labels": labels,
                          "holiday": hol.get(iso), "weekend": d.weekday() >= 5})
@@ -478,13 +501,22 @@ def _register_routes(app: Flask):
             if kind not in KIND_LABELS or ed < sd:
                 flash("신청 내용을 확인하세요.")
                 return redirect(url_for("my_requests"))
-            if unit not in UNIT_LABELS or kind not in LEAVE_KINDS:
+            if kind == "holiday_work":
+                unit = request.form.get("wunit") if request.form.get("wunit") in HW_UNITS else "full"
+            elif unit not in UNIT_LABELS or kind not in LEAVE_KINDS:
                 unit = "full" if kind in LEAVE_KINDS else "hours"
             if unit != "full":
                 ed = sd
             days = rules.leave_days(sd, ed, unit, holiday_set(sd, ed)) if kind in LEAVE_KINDS else 0
             minutes = 0
             corr_in = corr_out = None
+            if kind == "holiday_work":
+                ed = sd
+                if sd.weekday() < 5 and not holiday_set(sd, sd):
+                    flash("휴일근무는 토·일요일 또는 등록된 휴일에만 신청할 수 있습니다.")
+                    return redirect(url_for("my_requests"))
+                ratio = float(setting("comp_ratio") or 1)
+                days = (1.0 if unit == "full" else 0.5) * ratio
             if kind == "overtime":
                 minutes = int(float(request.form.get("hours") or 0) * 60)
                 if minutes <= 0:
@@ -503,6 +535,12 @@ def _register_routes(app: Flask):
                 if days > bal["remain"] - bal["pending"]:
                     flash(f"잔여 연차 부족 (잔여 {bal['remain']:g}일, 결재대기 {bal['pending']:g}일)")
                     return redirect(url_for("my_requests"))
+            if kind == "comp":
+                cb = comp_balance(me)
+                if days > cb["remain"] - cb["pending"]:
+                    flash(f"대체휴가 잔여 부족 (잔여 {cb['remain']:g}일, 결재대기 {cb['pending']:g}일). "
+                          "휴일근무 신청이 먼저 승인되어야 합니다.")
+                    return redirect(url_for("my_requests"))
             if kind in LEAVE_KINDS and days == 0:
                 flash("선택한 기간에 근무일이 없습니다.")
                 return redirect(url_for("my_requests"))
@@ -516,8 +554,9 @@ def _register_routes(app: Flask):
             return redirect(url_for("my_requests"))
         rows = db.execute("SELECT r.*, a.name AS approver FROM requests r LEFT JOIN users a ON a.id=r.approver_id "
                           "WHERE r.user_id=? ORDER BY r.id DESC LIMIT 100", (me["id"],)).fetchall()
-        return render_template("requests.html", rows=rows, bal=leave_balance(me), today=today(),
-                               leave_kinds=LEAVE_KINDS)
+        return render_template("requests.html", rows=rows, bal=leave_balance(me), comp=comp_balance(me),
+                               today=today(), leave_kinds=LEAVE_KINDS, hw_units=HW_UNITS,
+                               comp_ratio=float(setting("comp_ratio") or 1))
 
     @app.route("/requests/<int:rid>/cancel", methods=["POST"])
     @login_required
@@ -647,9 +686,7 @@ def _register_routes(app: Flask):
         summary = []
         for u in users:
             md = _month_data(u, first, last)
-            leave_days = get_db().execute(
-                "SELECT COALESCE(SUM(days),0) s FROM requests WHERE user_id=? AND status='approved' "
-                "AND start_date BETWEEN ? AND ?", (u["id"], first.isoformat(), last.isoformat())).fetchone()["s"]
+            leave_days = month_leave_days(u["id"], first, last)
             summary.append({"u": u, "work_days": md["work_days"], "total": md["total"],
                             "late": md["late_cnt"], "leave": leave_days})
         return render_template("admin_attendance.html", summary=summary, ym=ym)
@@ -702,7 +739,8 @@ def _register_routes(app: Flask):
         wb = Workbook()
         ws = wb.active
         ws.title = "월간집계"
-        head = ["부서", "이름", "직위", "출근일수", "총 근로시간", "지각횟수", "휴가사용(일)", "연차잔여(일)"]
+        head = ["부서", "이름", "직위", "출근일수", "총 근로시간", "지각횟수", "휴가사용(일)", "연차잔여(일)",
+                "대체휴가잔여(일)"]
         ws.append(head)
         detail = wb.create_sheet("일별상세")
         detail.append(["일자", "요일", "부서", "이름", "근무유형", "출근", "퇴근", "근로시간", "지각(분)",
@@ -710,11 +748,10 @@ def _register_routes(app: Flask):
         wd = "월화수목금토일"
         for u in users:
             md = _month_data(u, first, last)
-            lv = get_db().execute(
-                "SELECT COALESCE(SUM(days),0) s FROM requests WHERE user_id=? AND status='approved' "
-                "AND start_date BETWEEN ? AND ?", (u["id"], first.isoformat(), last.isoformat())).fetchone()["s"]
+            lv = month_leave_days(u["id"], first, last)
             ws.append([u["dept"] or "", u["name"], u["position"] or "", md["work_days"],
-                       rules.fmt_hm(md["total"]), md["late_cnt"], lv, leave_balance(u)["remain"]])
+                       rules.fmt_hm(md["total"]), md["late_cnt"], lv, leave_balance(u)["remain"],
+                       comp_balance(u)["remain"]])
             for x in md["days"]:
                 rec = x["rec"]
                 if not rec and not x["labels"]:
@@ -828,7 +865,7 @@ def _register_routes(app: Flask):
         users = visible_users()
         adjs = db.execute("SELECT a.*, u.name FROM leave_adjustments a JOIN users u ON u.id=a.user_id "
                           "ORDER BY a.id DESC LIMIT 50").fetchall()
-        return render_template("admin_leave.html", rows=[(u, leave_balance(u)) for u in users], adjs=adjs)
+        return render_template("admin_leave.html", rows=[(u, leave_balance(u), comp_balance(u)) for u in users], adjs=adjs)
 
     @app.route("/admin/settings", methods=["GET", "POST"])
     @role_required("admin")
@@ -837,7 +874,7 @@ def _register_routes(app: Flask):
         if request.method == "POST":
             sec = request.form.get("section")
             if sec == "company":
-                for k in ("company_name", "work_start", "work_end", "break_min", "late_grace_min"):
+                for k in ("company_name", "work_start", "work_end", "break_min", "late_grace_min", "comp_ratio"):
                     if request.form.get(k) is not None:
                         db.execute("UPDATE settings SET value=? WHERE key=?", (request.form[k].strip(), k))
                 db.execute("UPDATE settings SET value=? WHERE key='require_location'",

@@ -8,7 +8,11 @@
     <label>기본 출근시각<input type="time" name="work_start" value="{{ s.work_start }}"></label>
     <label>기본 퇴근시각<input type="time" name="work_end" value="{{ s.work_end }}"></label>
     <label>휴게시간(분)<input type="number" name="break_min" value="{{ s.break_min }}"></label>
-    <label>지각 유예(분)<input type="number" name="late_grace_min" value="{{ s.late_grace_min }}"></label>
+    <label>지각 유예(분) — 출근시각 + 이 시간까지 지각 아님<input type="number" name="late_grace_min" value="{{ s.late_grace_min }}"></label>
+    <label>대체휴가 적립 배율 (휴일근무 1일당)<select name="comp_ratio">
+      <option value="1" {{ 'selected' if s.comp_ratio in ('1','1.0') }}>1.0일 — 휴일대체(1:1)</option>
+      <option value="1.5" {{ 'selected' if s.comp_ratio == '1.5' }}>1.5일 — 보상휴가(가산 50% 포함)</option>
+    </select></label>
     <label class="check"><input type="checkbox" name="require_location" {{ 'checked' if s.require_location=='1' }}> '사무실' 출근은 근무지 반경 내에서만 허용</label>
     <div><button class="btn primary">저장</button></div>
   </form>

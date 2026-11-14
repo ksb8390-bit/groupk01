@@ -2,7 +2,8 @@
 {% block body %}
 <section class="card">
   <h1>휴가·근무 신청</h1>
-  <p class="small muted">연차 잔여 <b>{{ '%g'|format(bal.remain) }}일</b> (산정기간 {{ bal.period_start }} ~ {{ bal.period_end }}{% if bal.pending %}, 결재대기 {{ '%g'|format(bal.pending) }}일{% endif %})</p>
+  <p class="small muted">연차 잔여 <b>{{ '%g'|format(bal.remain) }}일</b> (산정기간 {{ bal.period_start }} ~ {{ bal.period_end }}{% if bal.pending %}, 결재대기 {{ '%g'|format(bal.pending) }}일{% endif %})<br>
+     대체휴가 잔여 <b>{{ '%g'|format(comp.remain) }}일</b> (적립 {{ '%g'|format(comp.earned) }} / 사용 {{ '%g'|format(comp.used) }}{% if comp.pending %} / 결재대기 {{ '%g'|format(comp.pending) }}{% endif %}{% if comp.earn_pending %} / 적립 승인대기 {{ '%g'|format(comp.earn_pending) }}{% endif %})</p>
   <form method="post" id="reqForm">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
     <label>구분
@@ -13,8 +14,13 @@
     <div class="row" data-for="leave">
       <label>단위<select name="unit">{% for k, v in UNIT.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
     </div>
+    <div data-for="holiday">
+      <label>근무 시간<select name="wunit">{% for k, v in hw_units.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
+      <p class="small muted">토·일요일 또는 등록된 휴일에 근무한 날을 선택하세요. 승인되면 대체휴가가 종일 {{ '%g'|format(comp_ratio) }}일 / 반일 {{ '%g'|format(comp_ratio/2) }}일 적립되고, '대체휴가'로 평일에 사용할 수 있습니다.</p>
+    </div>
+    <p class="small muted" data-for="comp">적립된 대체휴가 잔여 {{ '%g'|format(comp.remain) }}일 범위 안에서 신청할 수 있습니다.</p>
     <div class="row">
-      <label>시작일<input type="date" name="start_date" value="{{ today.isoformat() }}" required></label>
+      <label><span data-label="date">시작일</span><input type="date" name="start_date" value="{{ today.isoformat() }}" required></label>
       <label data-for="range">종료일<input type="date" name="end_date" value="{{ today.isoformat() }}"></label>
     </div>
     <label data-for="overtime">연장근무 시간(시간)<input type="number" name="hours" step="0.5" min="0.5" max="12"></label>
@@ -34,10 +40,10 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td>{{ KIND[r.kind] }}{% if r.kind in leave_kinds and r.unit!='full' %}<small> {{ UNIT[r.unit] }}</small>{% endif %}</td>
+      <td>{{ KIND[r.kind] }}{% if r.unit not in ('full','hours') %}<small> {{ ALL_UNITS[r.unit] }}</small>{% endif %}</td>
       <td class="small">{{ r.start_date[5:] }}{% if r.end_date!=r.start_date %}~{{ r.end_date[5:] }}{% endif %}
         {% if r.kind=='correction' %}<br>{{ r.corr_in or '' }}~{{ r.corr_out or '' }}{% endif %}</td>
-      <td>{% if r.days %}{{ '%g'|format(r.days) }}일{% elif r.minutes %}{{ hm(r.minutes) }}{% endif %}</td>
+      <td>{% if r.kind=='holiday_work' %}+{{ '%g'|format(r.days) }}일 적립{% elif r.days %}{{ '%g'|format(r.days) }}일{% elif r.minutes %}{{ hm(r.minutes) }}{% endif %}</td>
       <td><span class="st {{ r.status }}">{{ STATUS[r.status] }}</span>{% if r.approver %}<br><small class="muted">{{ r.approver }}</small>{% endif %}
         {% if r.decision_note %}<br><small>{{ r.decision_note }}</small>{% endif %}</td>
       <td>{% if r.status=='pending' or (r.status=='approved' and r.kind in leave_kinds and r.start_date > today.isoformat()) %}
@@ -59,6 +65,9 @@ function sync(){
   show('[data-for=leave]', isLeave);
   show('[data-for=overtime]', k === 'overtime');
   show('[data-for=correction]', k === 'correction');
+  show('[data-for=holiday]', k === 'holiday_work');
+  show('[data-for=comp]', k === 'comp');
+  document.querySelector('[data-label=date]').textContent = k === 'holiday_work' ? '근무일' : (k === 'correction' || k === 'overtime' ? '대상일' : '시작일');
   show('[data-for=range]', (isLeave && unit.value === 'full') || k === 'field');
 }
 kind.onchange = unit.onchange = sync; sync();
