@@ -21,6 +21,11 @@ from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    send_file, session, url_for)
 from werkzeug.security import check_password_hash, generate_password_hash
 
+
+def hash_pw(password: str) -> str:
+    # scrypt는 macOS 기본 Python(LibreSSL) 등 일부 환경에서 지원되지 않으므로 PBKDF2 고정
+    return generate_password_hash(password, method="pbkdf2:sha256:600000")
+
 from . import rules
 from .db import audit, close_db, get_db, init_db, setting
 
@@ -249,7 +254,7 @@ def _register_cli(app: Flask):
         db = get_db()
         db.execute("INSERT INTO users(login_id,password_hash,name,role,hire_date,must_change_pw) "
                    "VALUES (?,?,?,'admin',?,0)",
-                   (login, generate_password_hash(password), name, hire_date))
+                   (login, hash_pw(password), name, hire_date))
         db.commit()
         click.echo(f"관리자 계정 생성: {login}")
 
@@ -330,7 +335,7 @@ def _register_routes(app: Flask):
             else:
                 db = get_db()
                 db.execute("UPDATE users SET password_hash=?, must_change_pw=0 WHERE id=?",
-                           (generate_password_hash(new), me["id"]))
+                           (hash_pw(new), me["id"]))
                 db.commit()
                 flash("비밀번호가 변경되었습니다.")
                 return redirect(url_for("home"))
@@ -766,7 +771,7 @@ def _register_routes(app: Flask):
                 temp = f.get("password") or secrets.token_urlsafe(6)
                 db.execute("INSERT INTO users(name,role,department_id,position,phone,hire_date,work_start,work_end,"
                            "active,login_id,password_hash,must_change_pw) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
-                           (*vals, login_id, generate_password_hash(temp)))
+                           (*vals, login_id, hash_pw(temp)))
                 audit(me["id"], "user_create", login_id)
                 flash(f"직원 등록 완료 — 아이디 {login_id} / 임시 비밀번호 {temp} (첫 로그인 시 변경)")
             db.commit()
@@ -785,7 +790,7 @@ def _register_routes(app: Flask):
         db = get_db()
         temp = secrets.token_urlsafe(6)
         db.execute("UPDATE users SET password_hash=?, must_change_pw=1 WHERE id=?",
-                   (generate_password_hash(temp), uid))
+                   (hash_pw(temp), uid))
         audit(current_user()["id"], "password_reset", uid)
         db.commit()
         flash(f"임시 비밀번호: {temp} (직원에게 전달 후 첫 로그인 시 변경)")
