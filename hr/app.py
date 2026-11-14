@@ -182,6 +182,20 @@ def schedule_of(user) -> tuple[str, str]:
     return (user["work_start"] or setting("work_start"), user["work_end"] or setting("work_end"))
 
 
+def compute_late(user, check_in: datetime) -> int:
+    """지각(분). 주말·등록 휴일, 그리고 종일·오전반차·반반차 승인일은 지각으로 보지 않음."""
+    d = check_in.date()
+    if d.weekday() >= 5 or holiday_set(d, d):
+        return 0
+    excused = get_db().execute(
+        "SELECT 1 FROM requests WHERE user_id=? AND status='approved' AND ? BETWEEN start_date AND end_date "
+        f"AND kind IN ({','.join('?' * len(LEAVE_KINDS))}) AND unit IN ('full','am','quarter')",
+        (user["id"], d.isoformat(), *LEAVE_KINDS)).fetchone()
+    if excused:
+        return 0
+    return rules.late_minutes(check_in, schedule_of(user)[0], int(setting("late_grace_min")))
+
+
 def holiday_set(start: date, end: date) -> set[date]:
     rows = get_db().execute("SELECT day FROM holidays WHERE day BETWEEN ? AND ?",
                             (start.isoformat(), end.isoformat())).fetchall()
@@ -428,7 +442,7 @@ def _register_routes(app: Flask):
             if rec and rec["check_in"]:
                 flash("이미 출근 처리되었습니다.")
                 return redirect(url_for("home"))
-            late = rules.late_minutes(n, schedule_of(me)[0], int(setting("late_grace_min")))
+            late = compute_late(me, n)
             db.execute(
                 "INSERT INTO attendance(user_id,work_date,check_in,in_lat,in_lon,in_place,in_ip,"
                 "work_type,late_min,note) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -663,7 +677,7 @@ def _register_routes(app: Flask):
                          (r["user_id"], r["start_date"])).fetchone()
         cin = f"{r['start_date']} {r['corr_in']}:00" if r["corr_in"] else (rec["check_in"] if rec else None)
         cout = f"{r['start_date']} {r['corr_out']}:00" if r["corr_out"] else (rec["check_out"] if rec else None)
-        late = rules.late_minutes(parse_dt(cin), schedule_of(target)[0], int(setting("late_grace_min"))) if cin else 0
+        late = compute_late(target, parse_dt(cin)) if cin else 0
         if rec:
             db.execute("UPDATE attendance SET check_in=?, check_out=?, late_min=?, note=COALESCE(note,'')||? WHERE id=?",
                        (cin, cout, late, f" [정정#{r['id']}]", rec["id"]))
@@ -709,7 +723,7 @@ def _register_routes(app: Flask):
         cout = request.form.get("check_out") or None
         cin_s = f"{d} {cin}:00" if cin else None
         cout_s = f"{d} {cout}:00" if cout else None
-        late = rules.late_minutes(parse_dt(cin_s), schedule_of(target)[0], int(setting("late_grace_min"))) if cin_s else 0
+        late = compute_late(target, parse_dt(cin_s)) if cin_s else 0
         before = db.execute("SELECT check_in, check_out FROM attendance WHERE user_id=? AND work_date=?",
                             (uid, d)).fetchone()
         if not cin_s and not cout_s:

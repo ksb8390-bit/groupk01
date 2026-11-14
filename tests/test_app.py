@@ -211,3 +211,24 @@ def test_holiday_work_on_registered_holiday_and_ratio(app):
     with app.app_context():
         u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
         assert comp_balance(u)["earned"] == 1.5
+
+
+def test_no_late_on_weekend_or_morning_half_day(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    # 토요일 14시 출근 → 지각 아님
+    CLOCK["now"] = datetime(2026, 11, 14, 14, 0)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field"})
+    # 월요일 오전반차 승인 후 14시 출근 → 지각 아님
+    CLOCK["now"] = datetime(2026, 11, 13, 9, 0)
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "am", "start_date": "2026-11-16"})
+    _approve_all(app)
+    CLOCK["now"] = datetime(2026, 11, 16, 14, 0)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    # 화요일 오후반차는 오전 출근 기준 그대로 → 09:20 출근은 지각 20분
+    CLOCK["now"] = datetime(2026, 11, 17, 9, 20)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    with app.app_context():
+        rows = {r["work_date"]: r["late_min"] for r in get_db().execute("SELECT * FROM attendance").fetchall()}
+    assert rows == {"2026-11-14": 0, "2026-11-16": 0, "2026-11-17": 20}
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 5)
