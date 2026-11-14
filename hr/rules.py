@@ -116,11 +116,11 @@ def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 def leave_days(start: date, end: date, unit: str, holidays: set[date] | None = None) -> float:
     """휴가 사용일수. unit: full / am / pm / quarter."""
-    if unit in ("am", "pm"):
-        return 0.5
-    if unit == "quarter":
-        return 0.25
     holidays = holidays or set()
+    if unit in ("am", "pm", "quarter"):
+        if start.weekday() >= 5 or start in holidays:
+            return 0.0   # 휴무일 반차는 차감 없음 → 신청 불가 처리
+        return 0.5 if unit != "quarter" else 0.25
     n, d = 0, start
     while d <= end:
         if d.weekday() < 5 and d not in holidays:

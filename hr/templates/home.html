@@ -18,6 +18,13 @@
     <input type="hidden" name="csrf" value="{{ csrf_token() }}">
     <input type="hidden" name="lat"><input type="hidden" name="lon">
     <input type="hidden" name="action">
+    {% if open_prev %}
+    <div class="notice">
+      전날({{ open_prev.work_date[5:] }}) {{ open_prev.check_in|time }} 출근 기록에 퇴근이 없습니다.
+      <button type="button" class="btn dark wide" data-action="out">전날 근무 지금 퇴근 처리</button>
+      <small class="muted">자정을 넘겨 야근한 경우에 누르세요. 출근 후 {{ overnight_max }}시간이 지났거나 단순 누락이면 '근태정정'을 신청하세요.</small>
+    </div>
+    {% endif %}
     {% if not rec or not rec.check_in %}
     <div class="seg">
       {% for k, v in WORK_TYPES.items() %}

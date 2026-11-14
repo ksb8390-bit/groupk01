@@ -33,6 +33,7 @@
             <input type="hidden" name="work_date" value="{{ x.date.isoformat() }}">
             <input type="time" name="check_in" value="{{ (x.rec.check_in or '')[11:16] if x.rec }}">
             <input type="time" name="check_out" value="{{ (x.rec.check_out or '')[11:16] if x.rec }}">
+            <label class="check small"><input type="checkbox" name="out_next_day" {{ 'checked' if x.rec and x.rec.check_out and x.rec.check_out[:10] != x.rec.work_date }}> 익일 퇴근</label>
             <select name="work_type">{% for k,v in WORK_TYPES.items() %}<option value="{{k}}" {{ 'selected' if x.rec and x.rec.work_type==k }}>{{v}}</option>{% endfor %}</select>
             <input name="note" placeholder="수정 사유" required>
             <button class="btn small">저장</button>

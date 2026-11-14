@@ -158,9 +158,12 @@ def visible_users(include_inactive=False):
     args: list = []
     if not include_inactive:
         sql += " AND u.active=1"
-    if u["role"] == "manager":
-        sql += " AND (u.department_id IS ? OR u.id=?)"
+    if u["role"] == "manager" and u["department_id"] is not None:
+        sql += " AND (u.department_id=? OR u.id=?)"
         args += [u["department_id"], u["id"]]
+    elif u["role"] == "manager":   # 부서 미지정 부서장 → 본인만
+        sql += " AND u.id=?"
+        args.append(u["id"])
     elif u["role"] == "employee":
         sql += " AND u.id=?"
         args.append(u["id"])
@@ -174,12 +177,49 @@ def can_manage(user_id: int) -> bool:
         return True
     if u["role"] == "manager":
         t = get_db().execute("SELECT department_id FROM users WHERE id=?", (user_id,)).fetchone()
-        return t is not None and t["department_id"] == u["department_id"] and user_id != u["id"]
+        return (t is not None and u["department_id"] is not None
+                and t["department_id"] == u["department_id"] and user_id != u["id"])
     return False
 
 
 def schedule_of(user) -> tuple[str, str]:
     return (user["work_start"] or setting("work_start"), user["work_end"] or setting("work_end"))
+
+
+def valid_hm(v):
+    """'HH:MM' 형식만 통과, 아니면 None."""
+    try:
+        return datetime.strptime(v or "", "%H:%M").strftime("%H:%M")
+    except ValueError:
+        return None
+
+
+def overlapping_request(user_id, kind, unit, sd: date, ed: date):
+    """같은 기간 중복 신청 확인. 휴가끼리는 종일/같은 반차 단위가 겹치면 중복(오전+오후 반차는 허용)."""
+    if kind == "holiday_work":
+        return get_db().execute(
+            "SELECT * FROM requests WHERE user_id=? AND kind='holiday_work' AND status IN ('pending','approved') "
+            "AND start_date=?", (user_id, sd.isoformat())).fetchone()
+    for r in get_db().execute(
+            "SELECT * FROM requests WHERE user_id=? AND status IN ('pending','approved') "
+            f"AND kind IN ({','.join('?' * len(LEAVE_KINDS))}) AND start_date<=? AND end_date>=?",
+            (user_id, *LEAVE_KINDS, ed.isoformat(), sd.isoformat())).fetchall():
+        if unit == "full" or r["unit"] == "full" or r["unit"] == unit:
+            return r
+    return None
+
+
+LOCK_FAILS = 5            # 로그인 연속 실패 허용 횟수
+LOCK_MINUTES = 10         # 잠금 시간
+OVERNIGHT_MAX_HOURS = 20  # 전날 출근 건을 다음 날 퇴근 처리할 수 있는 최대 근무 시간
+
+
+def open_previous_record(user_id: int):
+    """전날 출근하고 퇴근하지 않은 기록(자정 넘긴 야근 퇴근용)."""
+    y = (today() - timedelta(days=1)).isoformat()
+    return get_db().execute(
+        "SELECT * FROM attendance WHERE user_id=? AND work_date=? AND check_in IS NOT NULL AND check_out IS NULL",
+        (user_id, y)).fetchone()
 
 
 def compute_late(user, check_in: datetime) -> int:
@@ -257,10 +297,10 @@ def month_leave_days(user_id: int, first: date, last: date) -> float:
 
 
 def month_range(ym: str | None) -> tuple[date, date, str]:
-    if ym:
-        y, m = map(int, ym.split("-"))
+    try:
+        y, m = map(int, (ym or "").split("-"))
         first = date(y, m, 1)
-    else:
+    except ValueError:
         first = today().replace(day=1)
     last = rules.add_months(first, 1) - timedelta(days=1)
     return first, last, first.strftime("%Y-%m")
@@ -312,6 +352,19 @@ def _register_filters(app: Flask):
     def _time(s):
         return s[11:16] if s else "-"
 
+    @app.errorhandler(400)
+    @app.errorhandler(403)
+    @app.errorhandler(404)
+    @app.errorhandler(500)
+    def error_page(e):
+        code = getattr(e, "code", 500) or 500
+        msgs = {400: ("요청 오류", getattr(e, "description", "") if code == 400 else ""),
+                403: ("접근 권한 없음", "이 화면은 관리자 또는 부서장만 볼 수 있습니다."),
+                404: ("페이지 없음", "주소를 확인하세요."),
+                500: ("일시적 오류", "잠시 후 다시 시도하세요. 계속되면 관리자에게 알려주세요.")}
+        title, message = msgs.get(code, msgs[500])
+        return render_template("error.html", title=title, message=message), code
+
     @app.before_request
     def csrf_protect():
         if request.method == "POST":
@@ -341,9 +394,22 @@ def _register_routes(app: Flask):
     @app.route("/login", methods=["GET", "POST"])
     def login():
         if request.method == "POST":
-            row = get_db().execute("SELECT * FROM users WHERE login_id=? AND active=1",
-                                   (request.form.get("login_id", "").strip(),)).fetchone()
-            if row and check_password_hash(row["password_hash"], request.form.get("password", "")):
+            login_id = request.form.get("login_id", "").strip()
+            db = get_db()
+            since = (now() - timedelta(minutes=LOCK_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+            fails = db.execute("SELECT COUNT(*) c FROM audit_log WHERE action='login_fail' AND target=? "
+                               "AND created_at>=?", (login_id, since)).fetchone()["c"]
+            if fails >= LOCK_FAILS:
+                flash(f"로그인 실패가 {LOCK_FAILS}회 누적되어 {LOCK_MINUTES}분간 잠겼습니다. 잠시 후 다시 시도하거나 관리자에게 문의하세요.")
+                return render_template("login.html")
+            row = db.execute("SELECT * FROM users WHERE login_id=? AND active=1", (login_id,)).fetchone()
+            if not (row and check_password_hash(row["password_hash"], request.form.get("password", ""))):
+                db.execute("INSERT INTO audit_log(actor_id, action, target, detail, created_at) VALUES (?,?,?,?,?)",
+                           (None, "login_fail", login_id, request.remote_addr or "",
+                            now().strftime("%Y-%m-%d %H:%M:%S")))
+                db.commit()
+                row = None
+            if row:
                 csrf = session.get("csrf")
                 session.clear()
                 session["uid"] = row["id"]
@@ -391,11 +457,12 @@ def _register_routes(app: Flask):
             "SELECT * FROM requests WHERE user_id=? AND status='approved' AND kind IN "
             f"({','.join('?' * len(LEAVE_KINDS))}) AND ? BETWEEN start_date AND end_date",
             (me["id"], *LEAVE_KINDS, t.isoformat())).fetchone()
+        open_prev = None if (rec and rec["check_in"]) else open_previous_record(me["id"])
         notices = db.execute("SELECT * FROM notices ORDER BY id DESC LIMIT 3").fetchall()
         wk = week_minutes(me["id"], t)
         ws, we = schedule_of(me)
         return render_template(
-            "home.html", rec=rec, on_leave=on_leave, notices=notices, week_min=wk,
+            "home.html", rec=rec, open_prev=open_prev, overnight_max=OVERNIGHT_MAX_HOURS, on_leave=on_leave, notices=notices, week_min=wk,
             week_limit=rules.WEEKLY_LIMIT_MIN, bal=leave_balance(me), comp=comp_balance(me), sched=(ws, we),
             today=t, consent=me["location_consent"],
             require_location=setting("require_location") == "1")
@@ -445,14 +512,23 @@ def _register_routes(app: Flask):
             late = compute_late(me, n)
             db.execute(
                 "INSERT INTO attendance(user_id,work_date,check_in,in_lat,in_lon,in_place,in_ip,"
-                "work_type,late_min,note) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "work_type,late_min,note) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(user_id,work_date) DO UPDATE SET check_in=excluded.check_in, "
+                "in_lat=excluded.in_lat, in_lon=excluded.in_lon, in_place=excluded.in_place, "
+                "in_ip=excluded.in_ip, work_type=excluded.work_type, late_min=excluded.late_min, "
+                "note=COALESCE(excluded.note, attendance.note) WHERE attendance.check_in IS NULL",
                 (me["id"], t, stamp, lat, lon, place, ip, work_type, late,
                  request.form.get("note") or None))
             flash(f"출근 {n:%H:%M}" + (f" (지각 {late}분)" if late else ""))
         elif action == "out":
             if not rec or not rec["check_in"]:
-                flash("출근 기록이 없습니다. 근태정정을 신청하세요.")
-                return redirect(url_for("home"))
+                rec = open_previous_record(me["id"])   # 전날 출근 → 자정 넘어 퇴근
+                if not rec:
+                    flash("출근 기록이 없습니다. 근태정정을 신청하세요.")
+                    return redirect(url_for("home"))
+                if n - parse_dt(rec["check_in"]) > timedelta(hours=OVERNIGHT_MAX_HOURS):
+                    flash(f"전날({rec['work_date']}) 퇴근 기록이 누락되었습니다. 근태정정을 신청하세요.")
+                    return redirect(url_for("home"))
             db.execute("UPDATE attendance SET check_out=?, out_lat=?, out_lon=?, out_place=?, out_ip=? "
                        "WHERE id=?", (stamp, lat, lon, place, ip, rec["id"]))
             flash(f"퇴근 {n:%H:%M}" + (" (퇴근 시각 갱신)" if rec["check_out"] else ""))
@@ -532,16 +608,25 @@ def _register_routes(app: Flask):
                 ratio = float(setting("comp_ratio") or 1)
                 days = (1.0 if unit == "full" else 0.5) * ratio
             if kind == "overtime":
-                minutes = int(float(request.form.get("hours") or 0) * 60)
-                if minutes <= 0:
-                    flash("연장근무 시간을 입력하세요.")
+                try:
+                    minutes = int(float(request.form.get("hours") or 0) * 60)
+                except ValueError:
+                    minutes = 0
+                if not 0 < minutes <= 12 * 60:
+                    flash("연장근무 시간을 0.5~12시간 사이로 입력하세요.")
                     return redirect(url_for("my_requests"))
                 ed = sd
             if kind == "correction":
-                corr_in = request.form.get("corr_in") or None
-                corr_out = request.form.get("corr_out") or None
+                corr_in = valid_hm(request.form.get("corr_in"))
+                corr_out = valid_hm(request.form.get("corr_out"))
                 if not (corr_in or corr_out):
                     flash("정정할 출근/퇴근 시각을 입력하세요.")
+                    return redirect(url_for("my_requests"))
+                if sd > today():
+                    flash("근태정정은 오늘 이전 날짜만 신청할 수 있습니다.")
+                    return redirect(url_for("my_requests"))
+                if corr_in and corr_out and corr_out <= corr_in:
+                    flash("퇴근 시각이 출근 시각보다 늦어야 합니다. (자정 넘긴 퇴근은 관리자에게 요청)")
                     return redirect(url_for("my_requests"))
                 ed = sd
             if kind in DEDUCT_KINDS:
@@ -555,8 +640,14 @@ def _register_routes(app: Flask):
                     flash(f"대체휴가 잔여 부족 (잔여 {cb['remain']:g}일, 결재대기 {cb['pending']:g}일). "
                           "휴일근무 신청이 먼저 승인되어야 합니다.")
                     return redirect(url_for("my_requests"))
+            if kind in LEAVE_KINDS or kind == "holiday_work":
+                dup = overlapping_request(me["id"], kind, unit, sd, ed)
+                if dup:
+                    flash(f"같은 기간에 이미 신청된 {KIND_LABELS[dup['kind']]}({STATUS_LABELS[dup['status']]})이 있습니다: "
+                          f"{dup['start_date']}" + (f"~{dup['end_date']}" if dup['end_date'] != dup['start_date'] else ""))
+                    return redirect(url_for("my_requests"))
             if kind in LEAVE_KINDS and days == 0:
-                flash("선택한 기간에 근무일이 없습니다.")
+                flash("선택한 날짜가 주말·휴일이라 휴가를 쓸 필요가 없습니다.")
                 return redirect(url_for("my_requests"))
             db.execute(
                 "INSERT INTO requests(user_id,kind,unit,start_date,end_date,days,minutes,corr_in,corr_out,reason) "
@@ -692,7 +783,8 @@ def _register_routes(app: Flask):
         first, last, ym = month_range(request.args.get("month"))
         uid = request.args.get("user", type=int)
         if uid:
-            target = next((u for u in users if u["id"] == uid), None)
+            pool = visible_users(include_inactive=True) if current_user()["role"] == "admin" else users
+            target = next((u for u in pool if u["id"] == uid), None)
             if not target:
                 abort(403)
             return render_template("attendance_month.html", target=target, ym=ym, admin=True,
@@ -719,10 +811,15 @@ def _register_routes(app: Flask):
         target = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if not target:
             abort(404)
-        cin = request.form.get("check_in") or None
-        cout = request.form.get("check_out") or None
+        cin = valid_hm(request.form.get("check_in"))
+        cout = valid_hm(request.form.get("check_out"))
         cin_s = f"{d} {cin}:00" if cin else None
         cout_s = f"{d} {cout}:00" if cout else None
+        if cout_s and request.form.get("out_next_day"):
+            cout_s = f"{(parse_d(d) + timedelta(days=1)).isoformat()} {cout}:00"
+        if cin_s and cout_s and cout_s <= cin_s:
+            flash("퇴근이 출근보다 빠릅니다. 자정을 넘겨 퇴근했다면 '익일 퇴근'을 체크하세요.")
+            return redirect(url_for("admin_attendance", user=uid, month=d[:7]))
         late = compute_late(target, parse_dt(cin_s)) if cin_s else 0
         before = db.execute("SELECT check_in, check_out FROM attendance WHERE user_id=? AND work_date=?",
                             (uid, d)).fetchone()
@@ -809,6 +906,9 @@ def _register_routes(app: Flask):
             vals = (f["name"].strip(), role, dept_id, f.get("position") or None, f.get("phone") or None,
                     f["hire_date"], f.get("work_start") or None, f.get("work_end") or None,
                     1 if f.get("active", "1") == "1" else 0)
+            if uid == me["id"] and (role != "admin" or vals[-1] == 0):
+                flash("본인 계정의 관리자 권한 해제·비활성화는 할 수 없습니다. 다른 관리자에게 요청하세요.")
+                return redirect(url_for("admin_users", edit=uid))
             if uid:
                 db.execute("UPDATE users SET name=?, role=?, department_id=?, position=?, phone=?, hire_date=?, "
                            "work_start=?, work_end=?, active=? WHERE id=?", (*vals, uid))
@@ -887,24 +987,47 @@ def _register_routes(app: Flask):
         db = get_db()
         if request.method == "POST":
             sec = request.form.get("section")
+            f = request.form
+            err = None
             if sec == "company":
-                for k in ("company_name", "work_start", "work_end", "break_min", "late_grace_min", "comp_ratio"):
-                    if request.form.get(k) is not None:
-                        db.execute("UPDATE settings SET value=? WHERE key=?", (request.form[k].strip(), k))
+                vals = {"company_name": (f.get("company_name") or "").strip() or setting("company_name"),
+                        "work_start": valid_hm(f.get("work_start")), "work_end": valid_hm(f.get("work_end"))}
+                for k, lo, hi in (("break_min", 0, 180), ("late_grace_min", 0, 120)):
+                    v = (f.get(k) or "").strip()
+                    vals[k] = v if v.isdigit() and lo <= int(v) <= hi else None
+                vals["comp_ratio"] = f.get("comp_ratio") if f.get("comp_ratio") in ("1", "1.5") else setting("comp_ratio")
+                bad = [k for k, v in vals.items() if v is None]
+                if bad or vals["work_end"] <= vals["work_start"]:
+                    err = "입력값을 확인하세요: 시각은 HH:MM, 휴게 0~180분, 지각 유예 0~120분, 퇴근이 출근보다 늦어야 합니다."
+                else:
+                    for k, v in vals.items():
+                        db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (k, v))
                 db.execute("UPDATE settings SET value=? WHERE key='require_location'",
                            ("1" if request.form.get("require_location") else "0",))
             elif sec == "workplace_add":
-                db.execute("INSERT INTO workplaces(name,lat,lon,radius_m) VALUES (?,?,?,?)",
-                           (request.form["name"], float(request.form["lat"]), float(request.form["lon"]),
-                            int(request.form.get("radius_m") or 200)))
+                try:
+                    lat, lon = float(f["lat"]), float(f["lon"])
+                    radius = int(f.get("radius_m") or 200)
+                    if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 10 <= radius <= 5000 and f["name"].strip()):
+                        raise ValueError
+                    db.execute("INSERT INTO workplaces(name,lat,lon,radius_m) VALUES (?,?,?,?)",
+                               (f["name"].strip(), lat, lon, radius))
+                except (KeyError, ValueError):
+                    err = "근무지명, 위도(예: 33.4996), 경도(예: 126.5312), 반경(10~5000m)을 확인하세요."
             elif sec == "workplace_del":
                 db.execute("DELETE FROM workplaces WHERE id=?", (request.form.get("id", type=int),))
             elif sec == "holiday_add":
-                parse_d(request.form["day"])
-                db.execute("INSERT OR REPLACE INTO holidays(day,name) VALUES (?,?)",
-                           (request.form["day"], request.form["name"]))
+                try:
+                    parse_d(f.get("day", ""))
+                    db.execute("INSERT OR REPLACE INTO holidays(day,name) VALUES (?,?)",
+                               (f["day"], (f.get("name") or "휴일").strip()))
+                except ValueError:
+                    err = "휴일 날짜를 확인하세요."
             elif sec == "holiday_del":
                 db.execute("DELETE FROM holidays WHERE day=?", (request.form["day"],))
+            if err:
+                flash(err)
+                return redirect(url_for("admin_settings"))
             audit(current_user()["id"], "settings_" + str(sec))
             db.commit()
             flash("저장했습니다.")
