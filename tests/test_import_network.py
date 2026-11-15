@@ -54,14 +54,16 @@ def _apply_all(client, tok, html, token, overrides=None):
 def test_import_shiftee_employees(app):
     a = app.test_client(); tok = login(a, "admin")
     html, token = _preview(a, tok)
-    assert html.count(">신규<") == 4 and html.count(">갱신<") == 1
+    assert html.count(">신규<") == 3 and html.count(">갱신<") == 2       # 대표이사 → 기존 관리자 계정 갱신
+    assert "기존 관리자 계정(admin)에 연결" in html
     r = _apply_all(a, tok, html, token)
-    assert "신규 계정 <b>4명</b>" in r.get_data(as_text=True)
+    assert "신규 계정 <b>3명</b>" in r.get_data(as_text=True) and "갱신 <b>2명</b>" in r.get_data(as_text=True)
     with app.app_context():
         db = get_db()
         u = {r["name"]: r for r in db.execute(
             "SELECT u.*, d.name AS dept FROM users u LEFT JOIN departments d ON d.id=u.department_id").fetchall()}
-    assert u["홍대표"]["role"] == "admin" and u["홍대표"]["dept"] is None and u["홍대표"]["login_id"] == "474505"
+    assert u["홍대표"]["role"] == "admin" and u["홍대표"]["dept"] is None and u["홍대표"]["login_id"] == "admin"
+    assert "admin" not in u                                               # 이름이 시프티 기준으로 바뀜
     assert u["이본부"]["role"] == "manager" and u["이본부"]["dept"] == "건설사업관리본부"
     assert u["최대리"]["login_id"].startswith("gk") and u["최대리"]["must_change_pw"] == 1
     assert u["박퇴사"]["active"] == 0
@@ -82,7 +84,7 @@ def test_import_shiftee_employees(app):
 def test_import_rejects_duplicate_login_and_keeps_preview(app):
     a = app.test_client(); tok = login(a, "admin")
     html, token = _preview(a, tok)
-    r = _apply_all(a, tok, html, token, {"login_0": "kim"})        # 이미 있는 아이디
+    r = _apply_all(a, tok, html, token, {"login_1": "kim"})        # 이미 있는 아이디
     assert "중복" in r.get_data(as_text=True)
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 3
@@ -129,3 +131,14 @@ def test_office_network_cidr_and_spoofing(app):
         assert client_ip() == "8.8.8.8" and not in_office_network(client_ip())    # 외부에서 헤더 위조 무시
     with app.test_request_context("/", environ_base={"REMOTE_ADDR": "127.0.0.1"}, headers={"X-Forwarded-For": "211.1.2.9"}):
         assert client_ip() == "211.1.2.9" and in_office_network(client_ip())      # 서버 내 프록시(Caddy) 경유
+
+
+def test_cli_import_employees(app, tmp_path):
+    x = tmp_path / "s.xlsx"
+    x.write_bytes(shiftee_xlsx(SAMPLE).getvalue())
+    out = tmp_path / "acc.xlsx"
+    r = app.test_cli_runner().invoke(args=["import-employees", str(x), "--out", str(out), "--yes"])
+    assert r.exit_code == 0, r.output
+    assert "신규 3명, 갱신 2명" in r.output and out.exists()
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 6   # 기존 3 + 신규 3

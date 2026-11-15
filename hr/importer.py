@@ -130,7 +130,74 @@ def plan(rows: list[dict]) -> list[dict]:
             seq += 1
         r["login_id"] = cand
         taken.add(cand)
+    # 대표이사(관리자) 행이 하나뿐이고 기존 관리자 계정도 하나뿐이면 같은 사람으로 보고 기존 계정을 갱신
+    # (앱 설치 때 만든 관리자 계정과 시프티 이름이 달라 중복 생성되는 것을 방지)
+    new_admins = [r for r in rows if r["action"] == "create" and r["role"] == "admin"]
+    matched = {r.get("user_id") for r in rows if r["action"] == "update"}
+    admins = [u for u in existing.values() if u["role"] == "admin" and u["active"] and u["id"] not in matched]
+    if len(new_admins) == 1 and len(admins) == 1:
+        r, u = new_admins[0], admins[0]
+        taken.discard(r["login_id"])
+        r.update(action="update", user_id=u["id"], login_id=u["login_id"], rename_from=u["name"])
     return rows
+
+
+def apply_rows(rows: list[dict], actor_id) -> tuple[list[list], int, int]:
+    """include=True 행을 DB에 반영하고 (계정 목록, 신규 수, 갱신 수) 반환."""
+    db = get_db()
+    dept_ids = {d["name"]: d["id"] for d in db.execute("SELECT * FROM departments").fetchall()}
+    accounts, created, updated = [], 0, 0
+    for r in rows:
+        if not r.get("include", True):
+            continue
+        if r["dept"] and r["dept"] not in dept_ids:
+            dept_ids[r["dept"]] = db.execute("INSERT INTO departments(name) VALUES (?)", (r["dept"],)).lastrowid
+        did = dept_ids.get(r["dept"]) if r["dept"] else None
+        active = 0 if r["leave_date"] else 1
+        if r["action"] == "update":
+            cur = db.execute("SELECT role FROM users WHERE id=?", (r["user_id"],)).fetchone()
+            role = "admin" if cur and cur["role"] == "admin" else r["role"]
+            db.execute("UPDATE users SET name=?, department_id=?, position=?, hire_date=?, role=?, "
+                       "phone=COALESCE(?, phone) WHERE id=?",
+                       (r["name"], did, r["position"], r["hire_date"], role, r["phone"], r["user_id"]))
+            updated += 1
+            accounts.append([r["name"], r["login_id"], "(기존 비밀번호 유지)", ROLE_LABELS[role], r["dept"] or "",
+                             r["position"] or "", r["hire_date"]])
+        else:
+            pw = "".join(secrets.choice(PW_CHARS) for _ in range(8))
+            db.execute("INSERT INTO users(login_id,password_hash,name,role,department_id,position,phone,hire_date,"
+                       "active,must_change_pw) VALUES (?,?,?,?,?,?,?,?,?,1)",
+                       (r["login_id"], hash_pw(pw), r["name"], r["role"], did, r["position"], r["phone"],
+                        r["hire_date"], active))
+            created += 1
+            accounts.append([r["name"], r["login_id"], pw, ROLE_LABELS[r["role"]], r["dept"] or "",
+                             r["position"] or "", r["hire_date"]])
+    audit(actor_id, "import_employees", f"신규 {created} / 갱신 {updated}")
+    db.commit()
+    return accounts, created, updated
+
+
+def save_accounts_xlsx(accounts: list[list], path: str):
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "계정"
+    ws.append(["이름", "아이디", "임시 비밀번호", "권한", "부서", "직위", "입사일"])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="1F3A5F")
+    for a in accounts:
+        ws.append(a)
+    for col, w in zip("ABCDEFG", (10, 14, 16, 10, 18, 10, 12)):
+        ws.column_dimensions[col].width = w
+    ws.append([])
+    ws.append(["※ 첫 로그인 시 비밀번호 변경이 강제됩니다. 전달 후 이 파일은 삭제하세요."])
+    wb.save(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 @bp.route("", methods=["GET"])
@@ -199,53 +266,9 @@ def apply():
         return render_template("import.html", step="preview", rows=rows, warns=[], token=token,
                                depts=depts, ROLES=ROLE_LABELS)
 
-    dept_ids = {d["name"]: d["id"] for d in db.execute("SELECT * FROM departments").fetchall()}
-    accounts, created, updated = [], 0, 0
-    for r in rows:
-        if not r["include"]:
-            continue
-        if r["dept"] and r["dept"] not in dept_ids:
-            dept_ids[r["dept"]] = db.execute("INSERT INTO departments(name) VALUES (?)", (r["dept"],)).lastrowid
-        did = dept_ids.get(r["dept"]) if r["dept"] else None
-        active = 0 if r["leave_date"] else 1
-        if r["action"] == "update":
-            cur = db.execute("SELECT role FROM users WHERE id=?", (r["user_id"],)).fetchone()
-            role = "admin" if cur and cur["role"] == "admin" else r["role"]
-            db.execute("UPDATE users SET department_id=?, position=?, hire_date=?, role=?, "
-                       "phone=COALESCE(?, phone) WHERE id=?",
-                       (did, r["position"], r["hire_date"], role, r["phone"], r["user_id"]))
-            updated += 1
-            accounts.append([r["name"], r["login_id"], "(기존 비밀번호 유지)", ROLE_LABELS[role], r["dept"] or "",
-                             r["position"] or "", r["hire_date"]])
-        else:
-            pw = "".join(secrets.choice(PW_CHARS) for _ in range(8))
-            db.execute("INSERT INTO users(login_id,password_hash,name,role,department_id,position,phone,hire_date,"
-                       "active,must_change_pw) VALUES (?,?,?,?,?,?,?,?,?,1)",
-                       (r["login_id"], hash_pw(pw), r["name"], r["role"], did, r["position"], r["phone"],
-                        r["hire_date"], active))
-            created += 1
-            accounts.append([r["name"], r["login_id"], pw, ROLE_LABELS[r["role"]], r["dept"] or "",
-                             r["position"] or "", r["hire_date"]])
-    audit(me["id"], "import_employees", f"신규 {created} / 갱신 {updated}")
-    db.commit()
+    accounts, created, updated = apply_rows(rows, me["id"])
     os.remove(path)
-
-    import openpyxl
-    from openpyxl.styles import Font, PatternFill
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "계정"
-    ws.append(["이름", "아이디", "임시 비밀번호", "권한", "부서", "직위", "입사일"])
-    for c in ws[1]:
-        c.font = Font(bold=True, color="FFFFFF")
-        c.fill = PatternFill("solid", fgColor="1F3A5F")
-    for a in accounts:
-        ws.append(a)
-    for col, w in zip("ABCDEFG", (10, 14, 16, 10, 18, 10, 12)):
-        ws.column_dimensions[col].width = w
-    ws.append([])
-    ws.append(["※ 첫 로그인 시 비밀번호 변경이 강제됩니다. 전달 후 이 파일은 삭제하세요."])
-    wb.save(_token_path(token, "-accounts.xlsx"))
+    save_accounts_xlsx(accounts, _token_path(token, "-accounts.xlsx"))
     return render_template("import.html", step="done", token=token, created=created, updated=updated)
 
 
@@ -265,3 +288,47 @@ def accounts(token):
 
 def register(app):
     app.register_blueprint(bp)
+
+    import click
+
+    @app.cli.command("import-employees")
+    @click.argument("xlsx", type=click.Path(exists=True, dir_okay=False))
+    @click.option("--out", default=None, help="임시 비밀번호 엑셀 저장 위치 (기본: 바탕화면)")
+    @click.option("--include-admin", is_flag=True, help="대표이사(관리자) 행도 새 계정으로 만듦")
+    @click.option("--yes", is_flag=True, help="확인 질문 없이 바로 적용")
+    def import_employees_cmd(xlsx, out, include_admin, yes):
+        """시프티 직원 목록 엑셀을 가져와 계정을 만듭니다."""
+        with open(xlsx, "rb") as fp:
+            rows, warns = parse_workbook(fp.read())
+        rows = plan(rows)
+        db = get_db()
+        has_admin = db.execute("SELECT 1 FROM users WHERE role='admin' AND active=1").fetchone() is not None
+        for r in rows:
+            r["include"] = True
+            if r["action"] == "create" and r["role"] == "admin" and has_admin and not include_admin:
+                r["include"] = False
+        for w in warns:
+            click.echo("경고: " + w)
+        click.echo(f"{'처리':4} {'이름':6} {'아이디':10} {'권한':5} {'부서':14} 직위")
+        for r in rows:
+            mark = ("신규" if r["action"] == "create" else "갱신") if r["include"] else "제외"
+            click.echo(f"{mark:4} {r['name']:6} {r['login_id']:10} {ROLE_LABELS[r['role']]:5} "
+                       f"{(r['dept'] or '-'):14} {r['position'] or ''}")
+        for r in rows:
+            if r.get("rename_from") and r["rename_from"] != r["name"]:
+                click.echo(f"※ {r['name']}(대표이사) → 기존 관리자 계정({r['login_id']})에 연결합니다. "
+                           f"계정 이름 '{r['rename_from']}' → '{r['name']}', 비밀번호는 그대로입니다.")
+        skipped = [r for r in rows if not r["include"]]
+        if skipped:
+            click.echo(f"※ 관리자 {len(skipped)}명은 기존 관리자 계정과 구분이 안 돼 제외했습니다(--include-admin 으로 포함).")
+        if not yes and not click.confirm(f"{sum(1 for r in rows if r['include'])}명을 반영할까요?", default=True):
+            click.echo("취소했습니다.")
+            return
+        admin = db.execute("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").fetchone()
+        accounts, created, updated = apply_rows(rows, admin["id"] if admin else None)
+        if out is None:
+            desk = os.path.join(os.path.expanduser("~"), "Desktop")
+            out = os.path.join(desk if os.path.isdir(desk) else os.getcwd(), "직원계정_임시비밀번호.xlsx")
+        save_accounts_xlsx(accounts, out)
+        click.echo(f"완료: 신규 {created}명, 갱신 {updated}명")
+        click.echo(f"임시 비밀번호 파일: {out}  (직원 전달 후 삭제하세요)")

@@ -30,7 +30,7 @@
       <tr class="{{ 'off' if r.leave_date }}">
         <td><input type="checkbox" name="inc_{{ i }}" value="1" {{ 'checked' if r.include is not defined or r.include }} style="width:auto"></td>
         <td><span class="st {{ 'approved' if r.action=='create' else 'pending' }}">{{ '신규' if r.action=='create' else '갱신' }}</span>{% if r.leave_date %}<br><small>퇴사 {{ r.leave_date }}</small>{% endif %}</td>
-        <td>{{ r.name }}</td>
+        <td>{{ r.name }}{% if r.rename_from and r.rename_from != r.name %}<br><small class="muted">기존 관리자 계정({{ r.login_id }})에 연결 · 이름 '{{ r.rename_from }}' → '{{ r.name }}'</small>{% endif %}</td>
         <td>{% if r.action=='create' %}<input name="login_{{ i }}" value="{{ r.login_id }}" style="width:9em;margin:0;padding:6px">{% else %}{{ r.login_id }}{% endif %}</td>
         <td><select name="role_{{ i }}" style="width:auto;margin:0;padding:6px">{% for k, v in ROLES.items() %}<option value="{{ k }}" {{ 'selected' if r.role==k }}>{{ v }}</option>{% endfor %}</select></td>
         <td class="small">{{ r.dept or '-' }}</td><td class="small">{{ r.position or '' }}</td><td class="small">{{ r.hire_date }}</td>
