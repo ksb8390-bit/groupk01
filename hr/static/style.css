@@ -122,3 +122,4 @@ body.chat main{padding:0;max-width:none}
 .msg.other .who{margin-left:2px}.msg .who b{color:var(--ink);font-weight:600}
 .msg.cont{margin-top:2px}
 .mem{display:inline-flex;align-items:center}
+.kpis.four{grid-template-columns:repeat(4,1fr)}.kpis.two{grid-template-columns:repeat(2,1fr)}

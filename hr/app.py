@@ -260,6 +260,8 @@ def open_previous_record(user_id: int):
 
 def compute_late(user, check_in: datetime) -> int:
     """지각(분). 주말·등록 휴일, 그리고 종일·오전반차·반반차 승인일은 지각으로 보지 않음."""
+    if setting("late_check") != "1":       # 선택근무제 등: 지각 판정 안 함
+        return 0
     d = check_in.date()
     if d.weekday() >= 5 or holiday_set(d, d):
         return 0
@@ -382,6 +384,7 @@ def _register_filters(app: Flask):
             "WORK_TYPES": WORK_TYPES, "ROLES": ROLE_LABELS,
             "company": setting("company_name"),
             "hm": rules.fmt_hm,
+            "late_on": setting("late_check") == "1",
         }
 
     @app.template_filter("time")
@@ -899,19 +902,20 @@ def _register_routes(app: Flask):
         wb = Workbook()
         ws = wb.active
         ws.title = "월간집계"
-        head = ["부서", "이름", "직위", "출근일수", "총 근로시간", "지각횟수", "휴가사용(일)", "연차잔여(일)",
-                "대체휴가잔여(일)"]
+        late_on = setting("late_check") == "1"
+        head = ["부서", "이름", "직위", "출근일수", "총 근로시간"] + (["지각횟수"] if late_on else []) + \
+               ["휴가사용(일)", "연차잔여(일)", "대체휴가잔여(일)"]
         ws.append(head)
         detail = wb.create_sheet("일별상세")
-        detail.append(["일자", "요일", "부서", "이름", "근무유형", "출근", "퇴근", "근로시간", "지각(분)",
-                       "휴가·신청", "출근위치", "비고"])
+        detail.append(["일자", "요일", "부서", "이름", "근무유형", "출근", "퇴근", "근로시간"] +
+                      (["지각(분)"] if late_on else []) + ["휴가·신청", "출근위치", "비고"])
         wd = "월화수목금토일"
         for u in users:
             md = _month_data(u, first, last)
             lv = month_leave_days(u["id"], first, last)
             ws.append([u["dept"] or "", u["name"], u["position"] or "", md["work_days"],
-                       rules.fmt_hm(md["total"]), md["late_cnt"], lv, leave_balance(u)["remain"],
-                       comp_balance(u)["remain"]])
+                       rules.fmt_hm(md["total"])] + ([md["late_cnt"]] if late_on else []) +
+                      [lv, leave_balance(u)["remain"], comp_balance(u)["remain"]])
             for x in md["days"]:
                 rec = x["rec"]
                 if not rec and not x["labels"]:
@@ -920,8 +924,8 @@ def _register_routes(app: Flask):
                     x["date"].isoformat(), wd[x["date"].weekday()], u["dept"] or "", u["name"],
                     WORK_TYPES.get(rec["work_type"], "") if rec else "",
                     (rec["check_in"] or "")[11:16] if rec else "", (rec["check_out"] or "")[11:16] if rec else "",
-                    rules.fmt_hm(x["minutes"]) if rec else "", rec["late_min"] if rec else "",
-                    ", ".join(x["labels"]), (rec["in_place"] or "") if rec else "", (rec["note"] or "") if rec else ""])
+                    rules.fmt_hm(x["minutes"]) if rec else ""] + ([rec["late_min"] if rec else ""] if late_on else []) +
+                    [", ".join(x["labels"]), (rec["in_place"] or "") if rec else "", (rec["note"] or "") if rec else ""])
         for sh in (ws, detail):
             for c in sh[1]:
                 c.font = Font(bold=True, color="FFFFFF")
@@ -1051,6 +1055,8 @@ def _register_routes(app: Flask):
                 else:
                     for k, v in vals.items():
                         db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (k, v))
+                db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('late_check', ?)",
+                           ("1" if f.get("late_check") else "0",))
                 db.execute("UPDATE settings SET value=? WHERE key='require_location'",
                            ("1" if request.form.get("require_location") else "0",))
             elif sec == "workplace_add":

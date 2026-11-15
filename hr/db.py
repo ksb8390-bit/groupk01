@@ -155,7 +155,8 @@ DEFAULT_SETTINGS = {
     "work_start": "09:00",
     "work_end": "18:00",
     "break_min": "60",
-    "late_grace_min": "10",    # 출근시각 + 10분까지는 지각 아님
+    "late_check": "0",         # 지각 판정 (0=끔: 선택근무제 등 출근시각 자율 / 1=켬)
+    "late_grace_min": "10",    # 지각 판정 시 출근시각 + 10분까지는 지각 아님
     "comp_ratio": "1",         # 휴일근무 1일당 대체휴가 적립 배율 (1 또는 1.5)
     "require_location": "0",   # 1이면 사내망 또는 근무지 반경 확인 없이는 '사무실' 출근 불가
     "office_networks": "",     # 사무실 인터넷 공인 IP(또는 대역) — Wi‑Fi 출근 인증 대용

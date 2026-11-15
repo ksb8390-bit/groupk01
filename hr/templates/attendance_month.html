@@ -8,10 +8,10 @@
       <input type="month" name="month" value="{{ ym }}" onchange="this.form.submit()">
     </form>
   </div>
-  <div class="kpis">
+  <div class="kpis {{ '' if late_on else 'two' }}">
     <div><span>출근일</span><b>{{ work_days }}일</b></div>
     <div><span>총 근로</span><b>{{ hm(total) }}</b></div>
-    <div><span>지각</span><b>{{ late_cnt }}회</b></div>
+    {% if late_on %}<div><span>지각</span><b>{{ late_cnt }}회</b></div>{% endif %}
   </div>
   <div class="tablewrap">
   <table>
@@ -20,7 +20,7 @@
     {% for x in days %}
       <tr class="{{ 'off' if x.weekend or x.holiday }}">
         <td>{{ x.date.strftime('%m/%d') }} {{ '월화수목금토일'[x.date.weekday()] }}</td>
-        <td>{{ x.rec.check_in|time if x.rec else '' }}{% if x.rec and x.rec.late_min %} <em class="late">+{{ x.rec.late_min }}</em>{% endif %}</td>
+        <td>{{ x.rec.check_in|time if x.rec else '' }}{% if late_on and x.rec and x.rec.late_min %} <em class="late">+{{ x.rec.late_min }}</em>{% endif %}</td>
         <td>{{ x.rec.check_out|time if x.rec else '' }}</td>
         <td>{{ hm(x.minutes) if x.minutes else '' }}</td>
         <td class="small">{{ x.holiday or '' }} {{ x.labels|join(', ') }}{% if x.rec and x.rec.work_type!='office' %} {{ WORK_TYPES[x.rec.work_type] }}{% endif %}{% if x.rec and x.rec.note %} <span class="muted">{{ x.rec.note }}</span>{% endif %}</td>

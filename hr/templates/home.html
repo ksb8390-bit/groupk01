@@ -3,12 +3,12 @@
 <section class="card clock">
   <div class="date">{{ today.strftime('%Y.%m.%d') }} ({{ '월화수목금토일'[today.weekday()] }})</div>
   <div class="now" id="now">--:--:--</div>
-  <div class="muted small">소정근로 {{ sched[0] }} ~ {{ sched[1] }}</div>
+  <div class="muted small">{% if late_on %}소정근로 {{ sched[0] }} ~ {{ sched[1] }}{% else %}출퇴근 시각 자율 (선택근무제){% endif %}</div>
   {% if on_leave %}<div class="badge leave">오늘 {{ KIND[on_leave.kind] }}{% if on_leave.unit!='full' %}({{ UNIT[on_leave.unit] }}){% endif %}</div>{% endif %}
 
   <div class="stamps">
     <div><span>출근</span><b>{{ rec.check_in|time if rec else '-' }}</b>
-      {% if rec and rec.late_min %}<em class="late">지각 {{ rec.late_min }}분</em>{% endif %}
+      {% if late_on and rec and rec.late_min %}<em class="late">지각 {{ rec.late_min }}분</em>{% endif %}
       {% if rec and rec.in_place %}<em>{{ rec.in_place }}</em>{% endif %}</div>
     <div><span>퇴근</span><b>{{ rec.check_out|time if rec else '-' }}</b>
       {% if rec and rec.out_place %}<em>{{ rec.out_place }}</em>{% endif %}</div>

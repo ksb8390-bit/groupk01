@@ -22,6 +22,7 @@ def app(tmp_path):
             db.execute("INSERT INTO users(login_id,password_hash,name,role,department_id,hire_date,must_change_pw) "
                        "VALUES (?,?,?,?,1,?,0)", (login, generate_password_hash("pw123456"), login, role, hire))
         db.execute("INSERT INTO workplaces(name,lat,lon,radius_m) VALUES ('본사',33.4996,126.5312,200)")
+        db.execute("UPDATE settings SET value='1' WHERE key='late_check'")   # 지각 판정 테스트용(회사 기본값은 끔)
         db.commit()
     return app
 
@@ -232,3 +233,31 @@ def test_no_late_on_weekend_or_morning_half_day(app):
         rows = {r["work_date"]: r["late_min"] for r in get_db().execute("SELECT * FROM attendance").fetchall()}
     assert rows == {"2026-11-14": 0, "2026-11-16": 0, "2026-11-17": 20}
     CLOCK["now"] = datetime(2026, 11, 10, 9, 5)
+
+
+def test_late_check_off_by_default_hides_late(tmp_path):
+    from hr.app import create_app
+    app2 = create_app({"TESTING": True, "DATABASE": str(tmp_path / "d.db"), "SECRET_KEY": "x",
+                       "NOW": lambda: datetime(2026, 11, 10, 11, 30)})
+    with app2.app_context():
+        db = get_db()
+        assert db.execute("SELECT value FROM settings WHERE key='late_check'").fetchone()["value"] == "0"
+        db.execute("INSERT INTO users(login_id,password_hash,name,role,hire_date,must_change_pw) VALUES "
+                   "('kim',?,'kim','admin','2024-03-01',0)", (generate_password_hash("pw123456"),))
+        db.commit()
+    c = app2.test_client(); tok = login(c, "kim")
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})   # 11:30 출근
+    with app2.app_context():
+        assert get_db().execute("SELECT late_min FROM attendance").fetchone()["late_min"] == 0
+    home = c.get("/").get_data(as_text=True)
+    assert "출퇴근 시각 자율" in home and "지각" not in home
+    assert "<span>지각</span>" not in c.get("/admin").get_data(as_text=True)
+    import openpyxl, io
+    ws = openpyxl.load_workbook(io.BytesIO(c.get("/admin/export?month=2026-11").data)).worksheets[0]
+    assert "지각횟수" not in [x.value for x in ws[1]]
+    # 설정에서 켜기
+    c.post("/admin/settings", data={"csrf": tok, "section": "company", "company_name": "G", "work_start": "09:00",
+                                    "work_end": "18:00", "break_min": "60", "late_grace_min": "10",
+                                    "comp_ratio": "1", "late_check": "on"})
+    with app2.app_context():
+        assert get_db().execute("SELECT value FROM settings WHERE key='late_check'").fetchone()["value"] == "1"
