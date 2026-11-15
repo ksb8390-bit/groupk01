@@ -195,7 +195,16 @@ def human(n):
 
 
 def ts(t):
-    return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+    """수정시각 → 문자열. 깨진 날짜(예: 30828년, 1601년)도 중단 없이 표시"""
+    try:
+        return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, OSError, OverflowError):
+        return f"날짜이상({t:.0f})"
+
+
+def valid_mtime(t, now):
+    """1980-01-01 ~ 현재+1일 범위만 정상으로 인정"""
+    return 315532800 <= t <= now + 86400
 
 
 def write_sheets(basename, sheets):
@@ -339,13 +348,17 @@ def cmd_report(args, cfg):
     by_ext = defaultdict(lambda: [0, 0])
     large, temps = [], []
     total_b = total_n = 0
-    errors = []
+    errors, bad_dates = [], []
 
     for dirpath, fn, full, st in walk(root, cfg, errors):
         rel = os.path.relpath(full, root)
         top = rel.split(os.sep)[0] if os.sep in rel else "(루트 파일)"
         t = by_top[top]
-        t[0] += st.st_size; t[1] += 1; t[2] = max(t[2], st.st_mtime)
+        t[0] += st.st_size; t[1] += 1
+        if valid_mtime(st.st_mtime, now):
+            t[2] = max(t[2], st.st_mtime)
+        else:
+            bad_dates.append((full, round(st.st_size / 1024 ** 2, 2), ts(st.st_mtime)))
         ext = os.path.splitext(fn)[1].lower() or "(없음)"
         by_ext[ext][0] += st.st_size; by_ext[ext][1] += 1
         total_b += st.st_size; total_n += 1
@@ -371,6 +384,8 @@ def cmd_report(args, cfg):
         print(f"  {r[1]:>9,.2f} GB  {r[3]:>5}%  {r[0]}  {r[5]}")
     print(f"  대용량(≥{cfg['large_file_mb']}MB) {len(large):,}개, "
           f"CAD·오피스 임시/백업 {len(temps):,}개 / {human(sum(s for _, s, _ in temps))}")
+    if bad_dates:
+        print(f"  수정일 이상 {len(bad_dates):,}건 ('날짜이상' 시트 참고, 최근수정 집계에서 제외)")
     if errors:
         print(f"  읽기 실패 {len(errors):,}건 (대부분 경로 과다 → 폴더 단계 축소 필요, '읽기실패' 시트 참고)")
 
@@ -380,6 +395,7 @@ def cmd_report(args, cfg):
         "대용량파일": (["경로", "크기(MB)", "수정일"], large_rows),
         "임시·백업파일": (["경로", "크기(MB)", "수정일"], temp_rows),
         "읽기실패": (ERR_SHEET_HEADER, sorted(errors, key=lambda r: -r[2])),
+        "날짜이상": (["경로", "크기(MB)", "수정일"], bad_dates[:50000]),
     })
 
 
