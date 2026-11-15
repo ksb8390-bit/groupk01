@@ -157,7 +157,9 @@ DEFAULT_SETTINGS = {
     "break_min": "60",
     "late_grace_min": "10",    # 출근시각 + 10분까지는 지각 아님
     "comp_ratio": "1",         # 휴일근무 1일당 대체휴가 적립 배율 (1 또는 1.5)
-    "require_location": "0",   # 1이면 위치(근무지 반경) 확인 없이는 '사무실' 출근 불가
+    "require_location": "0",   # 1이면 사내망 또는 근무지 반경 확인 없이는 '사무실' 출근 불가
+    "office_networks": "",     # 사무실 인터넷 공인 IP(또는 대역) — Wi‑Fi 출근 인증 대용
+    "office_network_name": "사무실 Wi‑Fi",
 }
 
 

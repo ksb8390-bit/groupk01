@@ -18,6 +18,19 @@
   </form>
 </section>
 <section class="card">
+  <h2>사무실 Wi‑Fi 출근 인증</h2>
+  <p class="small">사무실 Wi‑Fi에 연결된 휴대폰은 사무실 인터넷 주소(공인 IP)로 접속합니다. 이 주소를 등록하면 GPS 없이도 출근 기록에 '사무실 Wi‑Fi'로 표시되고, '근무지 확인 필수' 설정 시에도 출근이 허용됩니다.</p>
+  <p class="small">지금 접속한 주소: <b>{{ my_ip }}</b> {% if my_ip_ok %}<span class="st approved">등록된 사무실 네트워크</span>{% else %}<span class="st">미등록</span>{% endif %}<br>
+  <span class="muted">사무실 Wi‑Fi에 연결된 상태에서 아래 '현재 주소 추가'를 누르면 됩니다. 통신사 회선의 IP가 바뀌면 다시 등록하세요(고정 IP 회선 권장).</span></p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="office_network">
+    <label>표시 이름<input name="office_network_name" value="{{ s.office_network_name or '사무실 Wi‑Fi' }}" maxlength="30"></label>
+    <label>사무실 IP 목록 (한 줄에 하나, 대역은 192.168.1.0/24 형식)<textarea name="office_networks" rows="3">{{ s.office_networks or '' }}</textarea></label>
+    <div class="row"><button class="btn primary small">저장</button>
+      <button class="btn small" name="add_current" value="1">현재 주소 추가</button></div>
+  </form>
+</section>
+<section class="card">
   <h2>근무지 (위치 확인 기준)</h2>
   <ul class="list">{% for w in workplaces %}<li>{{ w.name }} <small class="muted">{{ w.lat }}, {{ w.lon }} · 반경 {{ w.radius_m }}m</small>
     <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_del"><input type="hidden" name="id" value="{{ w.id }}"><button class="link">삭제</button></form></li>{% endfor %}</ul>

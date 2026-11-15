@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import secrets
 from datetime import date, datetime, timedelta
 from functools import wraps
@@ -76,6 +77,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     _register_routes(app)
     from . import chat
     chat.register(app)
+    from . import importer
+    importer.register(app)
     return app
 
 
@@ -186,6 +189,37 @@ def can_manage(user_id: int) -> bool:
 
 def schedule_of(user) -> tuple[str, str]:
     return (user["work_start"] or setting("work_start"), user["work_end"] or setting("work_end"))
+
+
+def client_ip() -> str:
+    """접속 IP. 같은 서버의 프록시(Caddy) 뒤에서만 X-Forwarded-For를 신뢰(위조 방지)."""
+    remote = request.remote_addr or ""
+    if remote in ("127.0.0.1", "::1"):
+        fwd = request.headers.get("X-Forwarded-For", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return remote
+
+
+def office_networks() -> list:
+    import ipaddress
+    nets = []
+    for tok in re.split(r"[\s,]+", setting("office_networks") or ""):
+        if tok:
+            try:
+                nets.append(ipaddress.ip_network(tok, strict=False))
+            except ValueError:
+                pass
+    return nets
+
+
+def in_office_network(ip: str) -> bool:
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr in n for n in office_networks())
 
 
 def valid_hm(v):
@@ -503,14 +537,16 @@ def _register_routes(app: Flask):
                 if rules.haversine_m(lat, lon, wp["lat"], wp["lon"]) <= wp["radius_m"]:
                     place = wp["name"]
                     break
+        ip = client_ip()
+        if place is None and in_office_network(ip):
+            place = setting("office_network_name") or "사내망"
         if (setting("require_location") == "1" and work_type == "office" and place is None):
-            flash("등록된 근무지 반경 밖이거나 위치 정보가 없습니다. 현장/재택/출장을 선택하거나 위치 권한을 허용하세요.")
+            flash("사무실 Wi‑Fi에 연결되어 있지 않고 등록된 근무지 반경 밖입니다. 사무실 Wi‑Fi에 연결하거나 현장/재택/출장을 선택하세요.")
             return redirect(url_for("home"))
 
         n = now()
         t = n.date().isoformat()
         stamp = n.strftime("%Y-%m-%d %H:%M:%S")
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
         rec = db.execute("SELECT * FROM attendance WHERE user_id=? AND work_date=?",
                          (me["id"], t)).fetchone()
         if action == "in":
@@ -1027,6 +1063,23 @@ def _register_routes(app: Flask):
                                (f["name"].strip(), lat, lon, radius))
                 except (KeyError, ValueError):
                     err = "근무지명, 위도(예: 33.4996), 경도(예: 126.5312), 반경(10~5000m)을 확인하세요."
+            elif sec == "office_network":
+                import ipaddress
+                toks = [t for t in re.split(r"[\s,]+", f.get("office_networks") or "") if t]
+                if f.get("add_current"):
+                    toks.append(client_ip())
+                try:
+                    norm = []
+                    for t in toks:
+                        n = ipaddress.ip_network(t, strict=False)
+                        v = str(n.network_address) if n.num_addresses == 1 else str(n)
+                        if v not in norm:
+                            norm.append(v)
+                    db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('office_networks', ?)", ("\n".join(norm),))
+                    db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('office_network_name', ?)",
+                               ((f.get("office_network_name") or "사내망").strip()[:30],))
+                except ValueError:
+                    err = "IP 주소 형식을 확인하세요. 예: 211.234.10.25 또는 192.168.1.0/24"
             elif sec == "workplace_del":
                 db.execute("DELETE FROM workplaces WHERE id=?", (request.form.get("id", type=int),))
             elif sec == "holiday_add":
@@ -1046,7 +1099,7 @@ def _register_routes(app: Flask):
             flash("저장했습니다.")
             return redirect(url_for("admin_settings"))
         sets = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
-        return render_template("admin_settings.html", s=sets,
+        return render_template("admin_settings.html", s=sets, my_ip=client_ip(), my_ip_ok=in_office_network(client_ip()),
                                workplaces=db.execute("SELECT * FROM workplaces").fetchall(),
                                holidays=db.execute("SELECT * FROM holidays WHERE day>=? ORDER BY day",
                                                    (f"{today().year}-01-01",)).fetchall())
