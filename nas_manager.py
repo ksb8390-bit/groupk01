@@ -17,6 +17,7 @@ GroupK NAS(QNAP QTS) 관리 자동화 스크립트
   cleanup        정리 계획서(엑셀) 작성 — 파일 변경 없음
                  ① 중복: 1개만 보존 ② 백업·임시: 같은 폴더에 원본 있을 때만 ③ 압축: 전부 풀려 있을 때만
   cleanup-apply  검토·수정한 계획서대로 삭제 (기본 미리보기, --apply 시 실제 삭제)
+  cleanup-all    공유폴더 바로 아래 폴더들을 하나씩 계획→삭제 (완료 목록 기록, 이어하기 가능)
 
 공통
   - QNAP 시스템 폴더(@Recycle, .@__thumb, @Recently-Snapshot, .streams 등)는 자동 제외
@@ -219,7 +220,7 @@ def valid_mtime(t, now):
 def write_sheets(basename, sheets):
     """sheets: {시트명: (헤더 리스트, 행 리스트)} → xlsx 1개 또는 CSV 여러 개"""
     os.makedirs("nas_reports", exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if HAS_OPENPYXL:
         path = os.path.join("nas_reports", f"{basename}_{stamp}.xlsx")
         wb = Workbook()
@@ -237,14 +238,17 @@ def write_sheets(basename, sheets):
         print(f"[저장] {path}")
         return path
     else:
+        main_path = None
         for name, (header, rows) in sheets.items():
             path = os.path.join("nas_reports", f"{basename}_{name}_{stamp}.csv")
+            if name == "삭제계획":
+                main_path = path
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
                 w = csv.writer(f)
                 w.writerow(header)
                 w.writerows(rows)
             print(f"[저장] {path}")
-        return path
+        return main_path or path
 
 
 # =========================
@@ -740,12 +744,15 @@ def cmd_cleanup(args, cfg):
     print(f"  보류·보존 {len(held):,}건 ('보류' 시트)")
     if len(plan) > 1_000_000 and HAS_OPENPYXL:
         print("[주의] 삭제 후보가 100만 행을 넘어 엑셀 한도 초과 → 폴더를 나눠 실행하세요")
-    path = write_sheets("cleanup_plan", {
+    tag = getattr(args, "tag", "")
+    path = write_sheets("cleanup_plan" + (f"_{tag}" if tag else ""), {
         "요약": (["구분", "건수", "용량(GB)"], sum_rows),
         "삭제계획": (PLAN_HEADER, plan),
         "보류": (PLAN_HEADER, hold),
         "읽기실패": (ERR_SHEET_HEADER, errors),
     })
+    if getattr(args, "batch", False):
+        return path, sum(v[0] for v in summary.values()), total
     print("\n다음 단계")
     print("  1) 엑셀 '삭제계획' 시트 검토 → 지우면 안 되는 행은 '처리' 칸을 '보류'로 변경 후 저장")
     print("     ('보류' 시트의 행도 '처리'를 '삭제'로 바꿔 '삭제계획' 시트로 옮기면 함께 처리됨)")
@@ -774,14 +781,14 @@ def cmd_cleanup_apply(args, cfg):
     total_b = sum(int(float(r["_bytes"] or 0)) for r in rows)
     print(f"[계획] 삭제 표시 {len(rows):,}건 / {human(total_b)}")
     if not rows:
-        return
+        return {}
     if args.apply and not args.yes:
         ans = input(f"정말 {len(rows):,}개 파일을 삭제합니까? 계속하려면 '삭제' 입력: ").strip()
         if ans != "삭제":
             sys.exit("[취소] 아무것도 삭제하지 않았습니다.")
 
     os.makedirs("nas_reports", exist_ok=True)
-    log_path = os.path.join("nas_reports", f"cleanup_log_{datetime.now():%Y%m%d_%H%M}{'' if args.apply else '_미리보기'}.csv")
+    log_path = os.path.join("nas_reports", f"cleanup_log_{(getattr(args, 'tag', '') + '_') if getattr(args, 'tag', '') else ''}{datetime.now():%Y%m%d_%H%M%S}{'' if args.apply else '_미리보기'}.csv")
     stat = defaultdict(lambda: [0, 0])
     with open(log_path, "w", newline="", encoding="utf-8-sig") as lf:
         log = csv.writer(lf)
@@ -829,6 +836,75 @@ def cmd_cleanup_apply(args, cfg):
         print("※ 실제 여유공간은 ① QNAP 휴지통(@Recycle) 비우기 ② 해당 기간 스냅샷 만료/삭제 후에 늘어납니다.")
     else:
         print("※ 실제 삭제하려면 --apply 를 붙여 다시 실행")
+    return stat
+
+
+# =========================
+# 8-2. cleanup-all : 하위 폴더를 하나씩 계획 → 삭제 (이어하기 지원)
+# =========================
+
+def cmd_cleanup_all(args, cfg):
+    import argparse as _ap
+    root = os.path.abspath(args.root)
+    skip = {unicodedata.normalize("NFC", x) for x in (args.skip or [])}
+    os.makedirs("nas_reports", exist_ok=True)
+    done_path = os.path.join("nas_reports", "cleanup_all_완료목록.txt")
+    done = set()
+    if os.path.exists(done_path):
+        with open(done_path, encoding="utf-8") as f:
+            done = {unicodedata.normalize("NFC", l.rstrip("\n")) for l in f if l.strip()}
+
+    subs = sorted(d for d in os.listdir(root)
+                  if os.path.isdir(os.path.join(root, d)) and not d.startswith((".", "@", "#"))
+                  and not _match_any(d, cfg["exclude_dirs"]))
+    todo, skipped = [], []
+    for d in subs:
+        dn = unicodedata.normalize("NFC", d)
+        if dn in skip or (args.apply and dn in done) or _match_any(dn, cfg["protect_dirs"]):
+            skipped.append(dn)
+        else:
+            todo.append(d)
+    print(f"[대상] {root}")
+    print(f"  처리할 폴더 {len(todo)}개: {', '.join(unicodedata.normalize('NFC', d) for d in todo)}")
+    if skipped:
+        print(f"  제외 {len(skipped)}개(지정 제외·완료·보호): {', '.join(skipped)}")
+    if not todo:
+        return
+    if args.apply and not args.yes:
+        print("  각 폴더마다 계획서를 만든 뒤 검토 없이 바로 삭제합니다(판정 기준은 cleanup 과 동일).")
+        ans = input("계속하려면 '삭제' 입력 후 스페이스, 엔터: ").strip()
+        if ans != "삭제":
+            sys.exit("[취소] 아무것도 삭제하지 않았습니다.")
+
+    summary_path = os.path.join("nas_reports", f"cleanup_all_요약_{datetime.now():%Y%m%d_%H%M%S}.csv")
+    with open(summary_path, "w", newline="", encoding="utf-8-sig") as sf:
+        sw = csv.writer(sf)
+        sw.writerow(["폴더", "계획 건수", "계획 용량(GB)", "삭제 건수", "삭제 용량(GB)", "건너뜀", "실패", "계획서", "소요(분)"])
+        tot_n = tot_b = 0
+        for i, d in enumerate(todo, 1):
+            dn = unicodedata.normalize("NFC", d)
+            tag = re.sub(r"[^\w가-힣-]+", "_", dn)[:40]
+            t0 = time.time()
+            print(f"\n{'=' * 60}\n[{i}/{len(todo)}] {dn}\n{'=' * 60}")
+            plan, n, b = cmd_cleanup(_ap.Namespace(root=os.path.join(root, d), fast=args.fast, tag=tag, batch=True), cfg)
+            st = {}
+            if args.apply and n:
+                st = cmd_cleanup_apply(_ap.Namespace(plan=plan, apply=True, yes=True, verify=False, tag=tag), cfg)
+            dc, db = st.get("삭제", [0, 0])
+            tot_n += dc; tot_b += db
+            sw.writerow([dn, n, round(b / 1024 ** 3, 2), dc, round(db / 1024 ** 3, 2),
+                         st.get("건너뜀", [0])[0], st.get("실패", [0])[0], plan, round((time.time() - t0) / 60, 1)])
+            sf.flush()
+            if args.apply:
+                with open(done_path, "a", encoding="utf-8") as f:
+                    f.write(dn + "\n")
+    print(f"\n{'=' * 60}")
+    if args.apply:
+        print(f"[전체 완료] 삭제 {tot_n:,}건 / {human(tot_b)}")
+        print("※ 실제 여유공간은 ① QNAP 휴지통(@Recycle) 비우기 ② 이전 스냅샷 삭제 후에 늘어납니다.")
+    else:
+        print("[계획만 작성] 실제 삭제하려면 --apply 를 붙여 다시 실행")
+    print(f"[요약] {summary_path}")
 
 
 # =========================
@@ -867,6 +943,13 @@ def main():
     p.add_argument("--yes", action="store_true", help="확인 질문 생략")
     p.add_argument("--verify", action="store_true", help="중복 삭제 직전 보존본과 전체 해시 재대조")
 
+    p = sub.add_parser("cleanup-all", help="하위 폴더(연도 등)를 하나씩 계획→삭제. 중단 후 재실행 시 완료 폴더는 건너뜀")
+    p.add_argument("root", help="공유폴더 경로 (그 바로 아래 폴더들이 처리 단위)")
+    p.add_argument("--skip", nargs="*", help="제외할 폴더명 (예: --skip 2023 소송)")
+    p.add_argument("--apply", action="store_true", help="실제 삭제 (없으면 전 폴더 계획서만 작성)")
+    p.add_argument("--yes", action="store_true", help="확인 질문 생략")
+    p.add_argument("--fast", action="store_true", help="압축 대조 시 CRC 생략")
+
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.cmd == "cleanup-apply":
@@ -887,7 +970,8 @@ def main():
 
 def _run(args, cfg):
     {"init": cmd_init, "lint": cmd_lint, "report": cmd_report, "dupes": cmd_dupes,
-     "cleanup": cmd_cleanup, "cleanup-apply": cmd_cleanup_apply}[args.cmd](args, cfg)
+     "cleanup": cmd_cleanup, "cleanup-apply": cmd_cleanup_apply,
+     "cleanup-all": cmd_cleanup_all}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":
