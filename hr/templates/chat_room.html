@@ -3,6 +3,7 @@
 {% block bodyclass %}chat{% endblock %}
 {% block bottomnav %}{% endblock %}
 {% block body %}
+<div class="chat-app" id="chatApp">
 <div class="chat-head">
   <a class="back" href="{{ url_for('chat.index') }}" aria-label="대화 목록">‹</a>
   <b>{{ room.name }}</b>
@@ -60,6 +61,7 @@
     <button type="button" class="btn primary send" id="send">전송</button>
   </div>
 </div>
+</div>
 {% endblock %}
 {% block script %}
 <script>
@@ -106,7 +108,9 @@
     if (m.can_delete) { const d = el('button', 'del', '삭제'); d.type = 'button'; d.onclick = () => del(m.id); meta.appendChild(d); }
     row.appendChild(meta); w.appendChild(row); return w;
   }
-  function nearBottom() { return window.innerHeight + window.scrollY >= document.body.scrollHeight - 160; }
+  const app = document.getElementById('chatApp');
+  function nearBottom() { return box.scrollTop + box.clientHeight >= box.scrollHeight - 160; }
+  function toBottom() { box.scrollTop = box.scrollHeight; }
   function append(list, scroll) {
     const stick = scroll || nearBottom();
     for (const m of list) {
@@ -114,16 +118,16 @@
       if (m.date !== lastDate) { box.appendChild(el('div', 'day', dayLabel(m.date))); lastDate = m.date; if (!firstDate) firstDate = m.date; }
       box.appendChild(render(m)); lastId = m.id; if (!firstId) firstId = m.id;
     }
-    if (stick) window.scrollTo(0, document.body.scrollHeight);
+    if (stick) toBottom();
   }
   function prepend(list) {
-    const h = document.body.scrollHeight, anchor = olderBtn.parentNode.nextSibling;
+    const h = box.scrollHeight, anchor = olderBtn.parentNode.nextSibling;
     const frag = document.createDocumentFragment(); let d = '';
     for (const m of list) { if (m.date !== d) { frag.appendChild(el('div', 'day', dayLabel(m.date))); d = m.date; } frag.appendChild(render(m)); }
     if (anchor && anchor.classList && anchor.classList.contains('day') && anchor.textContent === dayLabel(d)) anchor.remove();
     box.insertBefore(frag, olderBtn.parentNode.nextSibling);
     if (list.length) firstId = list[0].id;
-    window.scrollTo(0, document.body.scrollHeight - h);
+    box.scrollTop = box.scrollHeight - h;
   }
   async function api(url, opts) {
     const r = await fetch(url, Object.assign({credentials: 'same-origin', headers: {'X-CSRF': CSRF, 'X-Requested-With': 'fetch'}}, opts || {}));
@@ -145,7 +149,21 @@
     catch (e) { alert(e.message); }
   }
 
+  // 키보드가 올라오면 보이는 영역(visualViewport) 높이로 대화 화면을 줄이고 마지막 메시지 유지
+  const vv = window.visualViewport;
+  function fit() {
+    if (!vv) return;
+    const stick = nearBottom();
+    app.style.height = vv.height + 'px';
+    app.style.top = vv.offsetTop + 'px';
+    app.classList.toggle('kb', vv.height < window.innerHeight - 120);
+    if (stick) toBottom();
+  }
+  if (vv) { vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); }
+  window.addEventListener('orientationchange', () => setTimeout(fit, 300));
+
   // 초기 메시지
+  fit();
   append({{ msgs|tojson }}, true);
   olderBtn.hidden = {{ 'false' if msgs|length >= 80 else 'true' }};
   olderBtn.onclick = async () => {
@@ -157,7 +175,8 @@
   // 텍스트
   const body = document.getElementById('body');
   const autosize = () => { body.style.height = 'auto'; body.style.height = Math.min(body.scrollHeight, 120) + 'px'; };
-  body.addEventListener('input', autosize);
+  body.addEventListener('input', () => { const s = nearBottom(); autosize(); if (s) toBottom(); });
+  body.addEventListener('focus', () => { setTimeout(() => { fit(); toBottom(); }, 300); });
   const sendText = () => { const t = body.value.trim(); if (!t) return; const fd = new FormData(); fd.append('body', t); body.value = ''; autosize(); sendForm(fd); };
   document.getElementById('send').onclick = sendText;
   body.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && window.matchMedia('(pointer:fine)').matches) { e.preventDefault(); sendText(); } });
