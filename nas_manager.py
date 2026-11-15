@@ -858,9 +858,10 @@ def cmd_cleanup_all(args, cfg):
                   if os.path.isdir(os.path.join(root, d)) and not d.startswith((".", "@", "#"))
                   and not _match_any(d, cfg["exclude_dirs"]))
     todo, skipped = [], []
+    key = lambda d: unicodedata.normalize("NFC", os.path.join(root, d))   # 완료 기록은 전체 경로로(공유폴더 간 동명 폴더 구분)
     for d in subs:
         dn = unicodedata.normalize("NFC", d)
-        if dn in skip or (args.apply and dn in done) or _match_any(dn, cfg["protect_dirs"]):
+        if dn in skip or (args.apply and key(d) in done) or _match_any(dn, cfg["protect_dirs"]):
             skipped.append(dn)
         else:
             todo.append(d)
@@ -897,7 +898,7 @@ def cmd_cleanup_all(args, cfg):
             sf.flush()
             if args.apply:
                 with open(done_path, "a", encoding="utf-8") as f:
-                    f.write(dn + "\n")
+                    f.write(key(d) + "\n")
     print(f"\n{'=' * 60}")
     if args.apply:
         print(f"[전체 완료] 삭제 {tot_n:,}건 / {human(tot_b)}")
