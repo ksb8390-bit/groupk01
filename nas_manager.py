@@ -106,6 +106,7 @@ DEFAULT_CONFIG = {
     ],
     "max_path_len": 240,          # Windows 260자 제한 대비 경고선
     "max_name_len": 120,
+    "max_path_bytes": 900,        # macOS 1024바이트 한계 대비 경고선 (NFD 기준)
 
     # report 옵션
     "large_file_mb": 500,
@@ -149,10 +150,26 @@ def _match_any(name, patterns):
     return any(fnmatch.fnmatch(name, p) for p in patterns)
 
 
-def walk(root, cfg):
-    """시스템 폴더를 제외하고 (dirpath, filename, full_path, stat) 생성"""
+def path_bytes(p):
+    return len(unicodedata.normalize("NFD", p).encode("utf-8"))
+
+
+def walk(root, cfg, errors=None):
+    """시스템 폴더를 제외하고 (dirpath, filename, full_path, stat) 생성.
+    읽지 못한 파일·폴더는 errors 리스트에 (경로, 사유, 경로바이트) 로 기록 (화면에는 처음 3건만 표시)"""
     ex_dirs, ex_files = cfg["exclude_dirs"], cfg["exclude_files"]
-    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: print(f"  [접근불가] {e}", file=sys.stderr)):
+    if errors is None:
+        errors = []
+
+    def note(path, e):
+        reason = "경로 과다(macOS 1024바이트 초과)" if getattr(e, "errno", None) == 63 else f"{type(e).__name__}: {e.strerror or e}"
+        errors.append((path, reason, path_bytes(path)))
+        if len(errors) <= 3:
+            print(f"  [읽기 실패] {reason} … {path[-80:]}", file=sys.stderr)
+        elif len(errors) == 4:
+            print("  [읽기 실패] 이후 건은 화면 표시 생략, 리포트 '읽기실패' 시트에 기록", file=sys.stderr)
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: note(e.filename or "", e)):
         dirnames[:] = [d for d in dirnames
                        if not d.startswith((".@", "@")) and not _match_any(d, ex_dirs)]
         for fn in filenames:
@@ -162,9 +179,12 @@ def walk(root, cfg):
             try:
                 st = os.stat(full)
             except OSError as e:
-                print(f"  [stat 실패] {full}: {e}", file=sys.stderr)
+                note(full, e)
                 continue
             yield dirpath, fn, full, st
+
+
+ERR_SHEET_HEADER = ["경로", "사유", "경로 바이트(NFD)"]
 
 
 def human(n):
@@ -255,6 +275,8 @@ def cmd_lint(args, cfg):
             issues.append("앞뒤 공백/끝 마침표")
         if len(full) > cfg["max_path_len"]:
             issues.append(f"경로 길이 {len(full)}자 > {cfg['max_path_len']}")
+        if path_bytes(full) > cfg["max_path_bytes"]:
+            issues.append(f"경로 {path_bytes(full):,}바이트 > {cfg['max_path_bytes']} (macOS 접근 위험)")
         if len(name) > cfg["max_name_len"]:
             issues.append(f"이름 길이 {len(name)}자")
         if kind == "파일":
@@ -273,13 +295,16 @@ def cmd_lint(args, cfg):
             iss = check("폴더", dirpath, d, os.path.join(dirpath, d))
             if iss:
                 rows.append(("폴더", os.path.join(dirpath, d), d, " / ".join(iss)))
-    for dirpath, fn, full, st in walk(args.root, cfg):
+    errors = []
+    for dirpath, fn, full, st in walk(args.root, cfg, errors):
         n += 1
         iss = check("파일", dirpath, fn, full)
         if iss:
             rows.append(("파일", full, fn, " / ".join(iss)))
 
-    print(f"[점검] 파일 {n:,}개 중 지적 {len(rows):,}건 (NFD {len(nfd_targets):,}건)")
+    for path, reason, nb in errors:
+        rows.append(("읽기실패", path, os.path.basename(path), f"{reason} / {nb:,}바이트"))
+    print(f"[점검] 파일 {n:,}개 중 지적 {len(rows):,}건 (NFD {len(nfd_targets):,}건, 읽기실패 {len(errors):,}건)")
     write_sheets("lint", {"파일명점검": (["구분", "경로", "이름", "지적사항"], rows)})
 
     if args.fix_nfd and nfd_targets:
@@ -314,8 +339,9 @@ def cmd_report(args, cfg):
     by_ext = defaultdict(lambda: [0, 0])
     large, temps = [], []
     total_b = total_n = 0
+    errors = []
 
-    for dirpath, fn, full, st in walk(root, cfg):
+    for dirpath, fn, full, st in walk(root, cfg, errors):
         rel = os.path.relpath(full, root)
         top = rel.split(os.sep)[0] if os.sep in rel else "(루트 파일)"
         t = by_top[top]
@@ -345,12 +371,15 @@ def cmd_report(args, cfg):
         print(f"  {r[1]:>9,.2f} GB  {r[3]:>5}%  {r[0]}  {r[5]}")
     print(f"  대용량(≥{cfg['large_file_mb']}MB) {len(large):,}개, "
           f"CAD·오피스 임시/백업 {len(temps):,}개 / {human(sum(s for _, s, _ in temps))}")
+    if errors:
+        print(f"  읽기 실패 {len(errors):,}건 (대부분 경로 과다 → 폴더 단계 축소 필요, '읽기실패' 시트 참고)")
 
     write_sheets("report", {
         "1차폴더별": (["폴더", "용량(GB)", "파일수", "비율(%)", "최근수정", f"비고(>{cfg['stale_days']}일)"], top_rows),
         "확장자별": (["확장자", "용량(GB)", "파일수"], ext_rows),
         "대용량파일": (["경로", "크기(MB)", "수정일"], large_rows),
         "임시·백업파일": (["경로", "크기(MB)", "수정일"], temp_rows),
+        "읽기실패": (ERR_SHEET_HEADER, sorted(errors, key=lambda r: -r[2])),
     })
 
 
@@ -376,7 +405,8 @@ def _hash(path, limit=None, chunk=1024 * 1024):
 def cmd_dupes(args, cfg):
     min_b = cfg["dupes_min_mb"] * 1024 ** 2
     by_size = defaultdict(list)
-    for _, fn, full, st in walk(args.root, cfg):
+    errors = []
+    for _, fn, full, st in walk(args.root, cfg, errors):
         if st.st_size >= min_b:
             by_size[st.st_size].append((full, st.st_mtime))
     cand = {s: v for s, v in by_size.items() if len(v) > 1}
@@ -409,7 +439,10 @@ def cmd_dupes(args, cfg):
             rows.append((gi, "원본(최초)" if i == 0 else "중복", p, round(size / 1024 ** 2, 2), ts(m), h[:16]))
     print(f"[결과] 중복 그룹 {len(groups):,}개, 절감 가능 {human(waste)}")
     print("※ 삭제는 수행하지 않음. 리포트 확인 후 NAS 휴지통(@Recycle) 사용 가능한 상태에서 수동 정리 권장")
-    write_sheets("dupes", {"중복파일": (["그룹", "구분", "경로", "크기(MB)", "수정일", "SHA256(앞16)"], rows)})
+    if errors:
+        print(f"  읽기 실패 {len(errors):,}건은 비교에서 제외됨")
+    write_sheets("dupes", {"중복파일": (["그룹", "구분", "경로", "크기(MB)", "수정일", "SHA256(앞16)"], rows),
+                           "읽기실패": (ERR_SHEET_HEADER, errors)})
 
 
 # =========================
