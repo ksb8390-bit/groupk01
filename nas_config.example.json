@@ -1,0 +1,11 @@
+{
+  "_설명": "nas_config.json 으로 복사 후 필요한 항목만 남겨 수정. 지정한 값만 기본값을 덮어씀",
+  "large_file_mb": 300,
+  "stale_days": 1095,
+  "dupes_min_mb": 5,
+  "max_path_len": 240,
+  "require_date_prefix_ext": [".pdf", ".hwp", ".hwpx", ".docx", ".xlsx"],
+  "project_templates": {
+    "설계": ["00_계약·행정", "02_계획설계", "04_실시설계", "05_인허가", "10_준공·성과품", "99_참고"]
+  }
+}
