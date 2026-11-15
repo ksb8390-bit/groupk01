@@ -4,8 +4,26 @@
   "stale_days": 1095,
   "dupes_min_mb": 5,
   "max_path_len": 240,
-  "require_date_prefix_ext": [".pdf", ".hwp", ".hwpx", ".docx", ".xlsx"],
+  "require_date_prefix_ext": [
+    ".pdf",
+    ".hwp",
+    ".hwpx",
+    ".docx",
+    ".xlsx"
+  ],
   "project_templates": {
-    "설계": ["00_계약·행정", "02_계획설계", "04_실시설계", "05_인허가", "10_준공·성과품", "99_참고"]
-  }
+    "설계": [
+      "00_계약·행정",
+      "02_계획설계",
+      "04_실시설계",
+      "05_인허가",
+      "10_준공·성과품",
+      "99_참고"
+    ]
+  },
+  "protect_dirs": [
+    "*소송*",
+    "*분쟁*"
+  ],
+  "_protect_dirs_설명": "폴더명이 이 패턴에 맞으면 그 아래 파일은 삭제 대상에서 제외(중복이면 이쪽이 보존본)"
 }

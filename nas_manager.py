@@ -14,11 +14,14 @@ GroupK NAS(QNAP QTS) 관리 자동화 스크립트
   lint    파일명 규칙 점검 + 한글 자소분리(NFD) 교정 (기본 점검만, --fix-nfd 시 이름 변경)
   report  용량(폴더·확장자별)·대용량·장기미사용·CAD 임시파일 리포트
   dupes   중복 파일 탐지 (크기 → 앞부분 해시 → 전체 SHA-256 3단계)
+  cleanup        정리 계획서(엑셀) 작성 — 파일 변경 없음
+                 ① 중복: 1개만 보존 ② 백업·임시: 같은 폴더에 원본 있을 때만 ③ 압축: 전부 풀려 있을 때만
+  cleanup-apply  검토·수정한 계획서대로 삭제 (기본 미리보기, --apply 시 실제 삭제)
 
 공통
   - QNAP 시스템 폴더(@Recycle, .@__thumb, @Recently-Snapshot, .streams 등)는 자동 제외
   - 결과는 ./nas_reports/ 에 xlsx(openpyxl 설치 시) 또는 CSV(utf-8-sig, 엑셀 호환)로 저장
-  - 파일을 삭제·이동하는 기능은 없음. 이름 변경은 --fix-nfd 를 명시할 때만 수행
+  - 삭제는 cleanup-apply --apply 로만 수행(계획서 검토 → 미리보기 → 확인 입력). 이름 변경은 --fix-nfd 명시 시만
   - 설정은 nas_config.json 으로 덮어쓸 수 있음 (nas_config.example.json 참고)
 """
 
@@ -112,11 +115,17 @@ DEFAULT_CONFIG = {
     "large_file_mb": 500,
     "stale_days": 730,            # 2년 이상 미수정 → 아카이브 후보
     "top_n": 200,
-    # CAD/오피스 잠금·임시·백업 파일 (정리 후보)
+    # CAD/오피스 잠금·임시·백업 파일 (report 집계용. 삭제 판정은 BACKUP_RULES 의 '원본 동반' 기준)
     "temp_patterns": [
-        "*.bak", "*.sv$", "*.dwl", "*.dwl2", "*.ac$", "*.tmp", "~$*", "*.~*",
-        "*.rvt.????.rvt", "*_backup*.rvt", "*.3dmbak", "*.skb", "*.swp",
+        "*.bak", "*.sv$", "*.dwl", "*.dwl2", "*.ac$", "*.tmp", "~$*",
+        "*.[0-9][0-9][0-9][0-9].rvt", "*.[0-9][0-9][0-9][0-9].rfa",
+        "*.3dmbak", "*.skb", "*~.skp", "*.bpn",
     ],
+
+    # cleanup 옵션
+    # 이 패턴이 경로 중 어느 폴더명에 걸리면 삭제 대상에서 제외 (중복 그룹에서는 '보존본'으로 우선)
+    "protect_dirs": [],
+    "archive_exts": [".zip", ".7z", ".rar", ".alz", ".egg", ".tar", ".gz", ".tgz"],
 
     # dupes 옵션
     "dupes_min_mb": 1,
@@ -226,6 +235,7 @@ def write_sheets(basename, sheets):
                 ws.column_dimensions[ws.cell(1, i).column_letter].width = 60 if "경로" in h else max(12, len(h) * 2 + 2)
         wb.save(path)
         print(f"[저장] {path}")
+        return path
     else:
         for name, (header, rows) in sheets.items():
             path = os.path.join("nas_reports", f"{basename}_{name}_{stamp}.csv")
@@ -234,6 +244,7 @@ def write_sheets(basename, sheets):
                 w.writerow(header)
                 w.writerows(rows)
             print(f"[저장] {path}")
+        return path
 
 
 # =========================
@@ -462,7 +473,361 @@ def cmd_dupes(args, cfg):
 
 
 # =========================
-# 7. 진입점
+# 7. cleanup : 정리 계획 수립 (파일 변경 없음)
+# =========================
+# 규칙 (2026-11 사내 방침)
+#   ① 중복 파일   : 내용(SHA-256) 동일 그룹에서 1개만 보존, 나머지 삭제
+#   ② 백업·임시   : 같은 폴더에 원본이 있을 때만 삭제. 원본 없는 백업은 '보류'(유일본일 수 있음)
+#   ③ 압축 파일   : 압축 내용 전부가 디스크에 같은 크기(+CRC)로 풀려 있을 때만 압축파일 삭제
+# 처리 순서: ② → ③ → ① (앞 단계에서 삭제될 파일은 중복 판정에서 제외 → 보존본이 삭제되는 일 없음)
+
+PLAN_HEADER = ["처리", "구분", "경로", "크기(MB)", "수정일", "근거", "보존본/원본 경로", "그룹", "_bytes", "_mtime"]
+
+# 중복 그룹 보존본 선정 시 감점 단어 (경로에 많이 포함될수록 삭제 쪽으로)
+KEEP_PENALTY = re.compile(
+    r"백업|backup|사본|복사본|copy|임시|\btemp\b|\btmp\b|다운로드|download|바탕\s*화면|desktop|"
+    r"개인|personal|휴지통|trash|\bold\b|이전|구버전|새\s*폴더|new folder|받은\s*파일|카톡|kakaotalk|"
+    r"_정리대기|\(\d+\)", re.I)
+
+
+def _exists_any(path):
+    """SMB(맥) 환경의 한글 정규화 차이(NFC/NFD)를 고려한 존재 확인 → 실제 경로 또는 None"""
+    for form in ("NFC", "NFD"):
+        p = unicodedata.normalize(form, path)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def backup_original(dirpath, fn):
+    """백업·임시 파일이면 (원본 경로 또는 None, 유형) 반환. 백업 유형이 아니면 None"""
+    low = fn.lower()
+    join = lambda n: _exists_any(os.path.join(dirpath, n))
+
+    def same_stem_any(stem, exclude_exts):
+        try:
+            names = os.listdir(dirpath)
+        except OSError:
+            return None
+        stem_n = unicodedata.normalize("NFC", stem).lower()
+        for n in names:
+            b, e = os.path.splitext(unicodedata.normalize("NFC", n))
+            if b.lower() == stem_n and e.lower() not in exclude_exts:
+                return os.path.join(dirpath, n)
+        return None
+
+    if low.endswith(".bak"):                                  # X.dwg.bak → X.dwg / X.bak → X.(dwg 등)
+        stem = fn[:-4]
+        if os.path.splitext(stem)[1]:
+            return join(stem), "BAK"
+        return (join(stem + ".dwg") or same_stem_any(stem, {".bak", ".dwl", ".dwl2"})), "BAK"
+    if low.endswith((".dwl", ".dwl2")):                       # AutoCAD 잠금파일
+        return join(os.path.splitext(fn)[0] + ".dwg"), "DWL(잠금)"
+    if low.endswith(".sv$"):                                  # AutoCAD 자동저장  X_1_1_1234.sv$
+        stem = re.sub(r"(_\d+){2,3}_\d+$", "", fn[:-4])
+        return join(stem + ".dwg"), "SV$(자동저장)"
+    m = re.match(r"^(.*)\.\d{4}\.(rvt|rfa|rte)$", fn, re.I)  # Revit  X.0001.rvt
+    if m:
+        return join(f"{m.group(1)}.{m.group(2)}"), "Revit 백업"
+    if low.endswith(".3dmbak"):
+        return join(fn[:-7] + ".3dm"), "Rhino 백업"
+    if low.endswith(".skb"):
+        return join(fn[:-4] + ".skp"), "SketchUp 백업"
+    if low.endswith("~.skp"):
+        return join(fn[:-5] + ".skp"), "SketchUp 백업"
+    if low.endswith(".bpn"):
+        return join(fn[:-4] + ".pln"), "ArchiCAD 백업"
+    if fn.startswith("~$"):                                   # Office 잠금 ~$보고서.docx (앞 2글자 치환)
+        tail = unicodedata.normalize("NFC", fn[2:])
+        try:
+            for n in os.listdir(dirpath):
+                nn = unicodedata.normalize("NFC", n)
+                if not nn.startswith("~$") and (nn == tail or nn[2:] == tail):
+                    return os.path.join(dirpath, n), "Office 잠금"
+        except OSError:
+            pass
+        return None, "Office 잠금"
+    return None
+
+
+def _zip_name(zi):
+    if zi.flag_bits & 0x800:
+        return zi.filename
+    raw = zi.filename.encode("cp437", errors="replace")
+    for enc in ("utf-8", "cp949"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return zi.filename
+
+
+def _crc_file(path):
+    import zlib
+    c = 0
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1024 * 1024), b""):
+            c = zlib.crc32(b, c)
+    return c & 0xFFFFFFFF
+
+
+def check_archive(full, fast=False):
+    """(판정, 근거, 풀린 위치) — 판정: 삭제 / 보류"""
+    import zipfile
+    dirpath, fn = os.path.split(full)
+    stem = os.path.splitext(fn)[0]
+    if stem.lower().endswith(".tar"):
+        stem = stem[:-4]
+    if not fn.lower().endswith(".zip"):
+        folder = _exists_any(os.path.join(dirpath, stem))
+        if folder and os.path.isdir(folder):
+            return "보류", "같은 이름 폴더 있음(이 형식은 내용 대조 불가 → 직접 확인 후 '삭제'로 변경)", folder
+        return "보류", "풀린 폴더 없음(형식상 내용 대조 불가)", ""
+    try:
+        with zipfile.ZipFile(full) as z:
+            members = [(zi, _zip_name(zi)) for zi in z.infolist()
+                       if not zi.is_dir() and "__MACOSX/" not in _zip_name(zi)
+                       and not _zip_name(zi).endswith(".DS_Store")]
+    except (zipfile.BadZipFile, OSError, NotImplementedError) as e:
+        return "보류", f"압축 열기 실패({type(e).__name__}) — 분할압축·손상 가능", ""
+    if not members:
+        return "보류", "빈 압축파일", ""
+
+    bases = [os.path.join(dirpath, stem), os.path.join(dirpath, stem + " 2"), dirpath]
+    best = (0, None, [])
+    for base in bases:
+        base = _exists_any(base)
+        if not base or not os.path.isdir(base):
+            continue
+        found = []
+        for zi, name in members:
+            p = _exists_any(os.path.join(base, *name.split("/")))
+            if p and os.path.isfile(p) and os.path.getsize(p) == zi.file_size:
+                found.append((zi, p))
+        if len(found) > best[0]:
+            best = (len(found), base, found)
+    n_found, base, found = best
+    total = len(members)
+    if n_found < total:
+        if n_found == 0:
+            return "보류", f"풀린 파일 없음(0/{total})", ""
+        return "보류", f"일부만 풀림({n_found}/{total}) — 압축 유지", base
+    if not fast:
+        for zi, p in found:
+            try:
+                if _crc_file(p) != zi.CRC:
+                    return "보류", f"풀린 파일 내용 불일치(CRC): {os.path.basename(p)}", base
+            except OSError:
+                return "보류", f"풀린 파일 읽기 실패: {os.path.basename(p)}", base
+    check_archive.last_found = [p for _, p in found]
+    return "삭제", f"전체 {total}개 파일이 풀려 있음({'크기' if fast else '크기+CRC'} 일치)", base
+
+
+def _protected(path, root, pats):
+    if not pats:
+        return False
+    parts = os.path.relpath(path, root).split(os.sep)[:-1]
+    return any(_match_any(unicodedata.normalize("NFC", d), pats) for d in parts)
+
+
+def cmd_cleanup(args, cfg):
+    root = os.path.abspath(args.root)
+    now = time.time()
+    min_b = cfg["dupes_min_mb"] * 1024 ** 2
+    pats = cfg["protect_dirs"]
+    arc_exts = tuple(e.lower() for e in cfg["archive_exts"])
+    rows, held, errors = [], [], []
+    to_delete = set()
+    anchors = set()   # 백업의 원본, 압축 삭제 근거가 된 풀린 파일 → 중복 판정에서 반드시 보존
+    nfc = lambda p: unicodedata.normalize("NFC", p)
+    archives, by_size = [], defaultdict(list)
+    n = 0
+
+    print("[1/4] 스캔 + 백업·임시 파일 판정")
+    for dirpath, fn, full, st in walk(root, cfg, errors):
+        n += 1
+        if n % 20000 == 0:
+            print(f"  … {n:,}개")
+        prot = _protected(full, root, pats)
+        rec = (full, st.st_size, st.st_mtime)
+        bk = backup_original(dirpath, fn)
+        if bk is not None:
+            orig, kind = bk
+            if prot:
+                held.append(("보호폴더", kind, full, st.st_size, st.st_mtime, "protect_dirs 해당", ""))
+            elif orig:
+                rows.append(("삭제", f"백업·임시({kind})", full, st.st_size, st.st_mtime, "같은 폴더에 원본 있음", orig, ""))
+                to_delete.add(full)
+                anchors.add(nfc(orig))
+            else:
+                held.append(("보류", f"백업·임시({kind})", full, st.st_size, st.st_mtime, "원본 없음 → 유일본 가능성", ""))
+            continue
+        if fn.lower().endswith(arc_exts) and not prot:
+            archives.append(rec)
+        if st.st_size >= min_b:
+            by_size[st.st_size].append((full, st.st_mtime, prot))
+
+    print(f"[2/4] 압축파일 {len(archives):,}개 대조 ({'크기' if args.fast else '크기+CRC'})")
+    for i, (full, size, mt) in enumerate(archives, 1):
+        if i % 200 == 0:
+            print(f"  … {i:,}/{len(archives):,}")
+        verdict, why, base = check_archive(full, args.fast)
+        if verdict == "삭제":
+            rows.append(("삭제", "압축(풀림)", full, size, mt, why, base, ""))
+            to_delete.add(full)
+            anchors.update(nfc(p) for p in check_archive.last_found)
+        else:
+            held.append(("보류", "압축", full, size, mt, why, base))
+
+    print("[3/4] 중복 파일 대조 (크기 → 앞 64KB → 전체 SHA-256)")
+    cand = [v for v in by_size.values() if len([x for x in v if x[0] not in to_delete]) > 1]
+    gid = 0
+    for gi, files in enumerate(cand, 1):
+        if gi % 500 == 0:
+            print(f"  … 크기 그룹 {gi:,}/{len(cand):,}")
+        files = [x for x in files if x[0] not in to_delete]
+        heads = defaultdict(list)
+        for x in files:
+            try:
+                heads[_hash(x[0], limit=64 * 1024)].append(x)
+            except OSError:
+                continue
+        for same in (v for v in heads.values() if len(v) > 1):
+            fulls = defaultdict(list)
+            for x in same:
+                try:
+                    fulls[_hash(x[0])].append(x)
+                except OSError:
+                    continue
+            for h, grp in fulls.items():
+                if len(grp) < 2:
+                    continue
+                gid += 1
+                size = os.path.getsize(grp[0][0]) if os.path.exists(grp[0][0]) else 0
+                protected = [x for x in grp if x[2] or nfc(x[0]) in anchors]
+                if protected:
+                    keep = protected
+                else:
+                    # 보존본 우선순위: 감점 단어 적음 → 먼저 만들어진 파일(원본) → 경로 짧음
+                    keep = [min(grp, key=lambda x: (len(KEEP_PENALTY.findall(os.path.relpath(x[0], root))),
+                                                     x[1] if valid_mtime(x[1], now) else 9e18,
+                                                     x[0].count(os.sep)))]
+                keep_paths = {k[0] for k in keep}
+                for x in grp:
+                    if x[0] in keep_paths:
+                        why = ("보호폴더" if x[2] else "압축·백업 판정 근거") if x in protected else "우선순위 1위"
+                        held.append(("보존", "중복(보존본)", x[0], size, x[1], f"그룹 {gid} 보존본({why})", ""))
+                    else:
+                        rows.append(("삭제", "중복", x[0], size, x[1], f"SHA256 {h[:16]} 동일", keep[0][0], gid))
+
+    print("[4/4] 계획서 작성")
+    fmt = lambda r: (r[0], r[1], r[2], round(r[3] / 1024 ** 2, 2), ts(r[4]), r[5], r[6],
+                     r[7] if len(r) > 7 else "", r[3], round(r[4], 3))
+    plan = [fmt(r) for r in sorted(rows, key=lambda r: (r[1], -r[3]))]
+    hold = [fmt(r + ("",)) for r in sorted(held, key=lambda r: (r[1], -r[3]))]
+
+    summary = defaultdict(lambda: [0, 0])
+    for r in rows:
+        k = "중복" if r[1] == "중복" else r[1].split("(")[0]
+        summary[k][0] += 1; summary[k][1] += r[3]
+    total = sum(v[1] for v in summary.values())
+    sum_rows = [(k, v[0], round(v[1] / 1024 ** 3, 2)) for k, v in summary.items()]
+    sum_rows.append(("합계", sum(v[0] for v in summary.values()), round(total / 1024 ** 3, 2)))
+
+    print(f"\n[계획] 스캔 {n:,}개 / 읽기실패 {len(errors):,}개")
+    for k, c, g in sum_rows:
+        print(f"  {k:<10} {c:>9,}개  {g:>9,.2f} GB")
+    print(f"  보류·보존 {len(held):,}건 ('보류' 시트)")
+    if len(plan) > 1_000_000 and HAS_OPENPYXL:
+        print("[주의] 삭제 후보가 100만 행을 넘어 엑셀 한도 초과 → 폴더를 나눠 실행하세요")
+    path = write_sheets("cleanup_plan", {
+        "요약": (["구분", "건수", "용량(GB)"], sum_rows),
+        "삭제계획": (PLAN_HEADER, plan),
+        "보류": (PLAN_HEADER, hold),
+        "읽기실패": (ERR_SHEET_HEADER, errors),
+    })
+    print("\n다음 단계")
+    print("  1) 엑셀 '삭제계획' 시트 검토 → 지우면 안 되는 행은 '처리' 칸을 '보류'로 변경 후 저장")
+    print("     ('보류' 시트의 행도 '처리'를 '삭제'로 바꿔 '삭제계획' 시트로 옮기면 함께 처리됨)")
+    print(f"  2) 미리보기 : python3 nas_manager.py cleanup-apply \"{path}\"")
+    print(f"  3) 실제삭제 : python3 nas_manager.py cleanup-apply \"{path}\" --apply")
+
+
+# =========================
+# 8. cleanup-apply : 계획서대로 삭제
+# =========================
+
+def _read_plan(path):
+    if path.lower().endswith(".xlsx"):
+        from openpyxl import load_workbook
+        wb = load_workbook(path, read_only=True)
+        ws = wb["삭제계획"]
+        it = ws.iter_rows(values_only=True)
+        header = [str(h) for h in next(it)]
+        return [dict(zip(header, r)) for r in it if r and r[0] is not None]
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def cmd_cleanup_apply(args, cfg):
+    rows = [r for r in _read_plan(args.plan) if str(r.get("처리", "")).strip() == "삭제"]
+    total_b = sum(int(float(r["_bytes"] or 0)) for r in rows)
+    print(f"[계획] 삭제 표시 {len(rows):,}건 / {human(total_b)}")
+    if not rows:
+        return
+    if args.apply and not args.yes:
+        ans = input(f"정말 {len(rows):,}개 파일을 삭제합니까? 계속하려면 '삭제' 입력: ").strip()
+        if ans != "삭제":
+            sys.exit("[취소] 아무것도 삭제하지 않았습니다.")
+
+    os.makedirs("nas_reports", exist_ok=True)
+    log_path = os.path.join("nas_reports", f"cleanup_log_{datetime.now():%Y%m%d_%H%M}{'' if args.apply else '_미리보기'}.csv")
+    stat = defaultdict(lambda: [0, 0])
+    with open(log_path, "w", newline="", encoding="utf-8-sig") as lf:
+        log = csv.writer(lf)
+        log.writerow(["결과", "구분", "경로", "크기(bytes)", "사유"])
+        for i, r in enumerate(rows, 1):
+            path, kind, ref = r["경로"], r["구분"], (r.get("보존본/원본 경로") or "")
+            size, mt = int(float(r["_bytes"] or 0)), float(r["_mtime"] or 0)
+            real = _exists_any(path)
+            if not real:
+                res, why = "건너뜀", "이미 없음"
+            else:
+                st = os.stat(real)
+                if st.st_size != size or abs(st.st_mtime - mt) > 2:
+                    res, why = "건너뜀", "계획 이후 파일이 변경됨"
+                elif ref and not _exists_any(ref):
+                    res, why = "건너뜀", "보존본/원본/풀린 폴더가 사라짐"
+                elif kind == "중복" and os.path.getsize(_exists_any(ref)) != size:
+                    res, why = "건너뜀", "보존본 크기 변경됨"
+                elif kind == "중복" and args.verify and _hash(real) != _hash(_exists_any(ref)):
+                    res, why = "건너뜀", "보존본 내용 변경됨(재해시)"
+                elif not args.apply:
+                    res, why = "삭제예정", ""
+                else:
+                    try:
+                        os.remove(real)
+                        res, why = "삭제", ""
+                    except OSError as e:
+                        res, why = "실패", str(e)
+            stat[res][0] += 1
+            stat[res][1] += size if res in ("삭제", "삭제예정") else 0
+            log.writerow([res, kind, path, size, why])
+            if i % 1000 == 0:
+                lf.flush()
+                print(f"  … {i:,}/{len(rows):,}")
+    print(f"[{'완료' if args.apply else '미리보기'}]")
+    for k, (c, b) in stat.items():
+        print(f"  {k:<6} {c:>9,}건  {human(b) if b else ''}")
+    print(f"[기록] {log_path}")
+    if args.apply:
+        print("※ 실제 여유공간은 ① QNAP 휴지통(@Recycle) 비우기 ② 해당 기간 스냅샷 만료/삭제 후에 늘어납니다.")
+    else:
+        print("※ 실제 삭제하려면 --apply 를 붙여 다시 실행")
+
+
+# =========================
+# 9. 진입점
 # =========================
 
 def main():
@@ -487,14 +852,28 @@ def main():
     p = sub.add_parser("dupes", help="중복 파일 탐지")
     p.add_argument("root")
 
+    p = sub.add_parser("cleanup", help="정리 계획서 작성 (중복·원본동반 백업·풀린 압축) — 파일 변경 없음")
+    p.add_argument("root")
+    p.add_argument("--fast", action="store_true", help="압축 대조 시 CRC 생략(크기만 비교)")
+
+    p = sub.add_parser("cleanup-apply", help="검토한 계획서대로 삭제 (기본 미리보기)")
+    p.add_argument("plan", help="cleanup 이 만든 계획서(.xlsx/.csv)")
+    p.add_argument("--apply", action="store_true", help="실제 삭제")
+    p.add_argument("--yes", action="store_true", help="확인 질문 생략")
+    p.add_argument("--verify", action="store_true", help="중복 삭제 직전 보존본과 전체 해시 재대조")
+
     args = ap.parse_args()
     cfg = load_config(args.config)
-    if not os.path.isdir(args.root):
+    if args.cmd == "cleanup-apply":
+        if not os.path.isfile(args.plan):
+            sys.exit(f"[오류] 계획서 없음: {args.plan}")
+    elif not os.path.isdir(args.root):
         sys.exit(f"[오류] 폴더가 없거나 접근 불가: {args.root}")
     if not HAS_OPENPYXL:
         print("[안내] openpyxl 미설치 → CSV로 저장합니다 (pip install openpyxl)")
     t0 = time.time()
-    {"init": cmd_init, "lint": cmd_lint, "report": cmd_report, "dupes": cmd_dupes}[args.cmd](args, cfg)
+    {"init": cmd_init, "lint": cmd_lint, "report": cmd_report, "dupes": cmd_dupes,
+     "cleanup": cmd_cleanup, "cleanup-apply": cmd_cleanup_apply}[args.cmd](args, cfg)
     print(f"[소요] {time.time() - t0:,.1f}초")
 
 
