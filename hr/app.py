@@ -83,6 +83,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     if test_config:
         app.config.update(test_config)
 
+    _setup_error_log(app)
     app.teardown_appcontext(close_db)
     with app.app_context():
         init_db()  # CREATE IF NOT EXISTS — 기존 데이터 유지
@@ -94,6 +95,19 @@ def create_app(test_config: dict | None = None) -> Flask:
     from . import importer
     importer.register(app)
     return app
+
+
+def _setup_error_log(app: Flask):
+    """서버 오류(500)를 instance/error.log 에 기록 (문의 시 이 파일 끝부분을 보내면 원인 확인 가능)."""
+    import logging
+    from logging.handlers import RotatingFileHandler
+    if app.config.get("TESTING"):
+        return
+    h = RotatingFileHandler(os.path.join(app.instance_path, "error.log"), maxBytes=1_000_000, backupCount=3,
+                            encoding="utf-8")
+    h.setLevel(logging.ERROR)
+    h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    app.logger.addHandler(h)
 
 
 def _load_or_create_secret(instance_path: str) -> str:
@@ -423,7 +437,12 @@ def _register_filters(app: Flask):
                 404: ("페이지 없음", "주소를 확인하세요."),
                 500: ("일시적 오류", "잠시 후 다시 시도하세요. 계속되면 관리자에게 알려주세요.")}
         title, message = msgs.get(code, msgs[500])
-        return render_template("error.html", title=title, message=message), code
+        ref = None
+        if code == 500:
+            ref = now().strftime("%m%d-%H%M%S")
+            app.logger.error("오류번호 %s %s %s", ref, request.method, request.full_path,
+                             exc_info=getattr(e, "original_exception", None) or e)
+        return render_template("error.html", title=title, message=message, ref=ref), code
 
     @app.before_request
     def csrf_protect():

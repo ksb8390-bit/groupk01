@@ -3,6 +3,7 @@
 <section class="card narrow">
   <h1>{{ title }}</h1>
   <p>{{ message }}</p>
+  {% if ref %}<p class="small muted">오류번호 {{ ref }} — 관리자에게 이 번호를 알려주세요. (기록 위치: instance/error.log)</p>{% endif %}
   <a class="btn primary" href="{{ url_for('home') }}">처음 화면으로</a>
 </section>
 {% endblock %}
