@@ -1062,7 +1062,14 @@ def _register_routes(app: Flask):
         users = visible_users()
         adjs = db.execute("SELECT a.*, u.name FROM leave_adjustments a JOIN users u ON u.id=a.user_id "
                           "ORDER BY a.id DESC LIMIT 50").fetchall()
-        return render_template("admin_leave.html", rows=[(u, leave_balance(u), comp_balance(u)) for u in users], adjs=adjs)
+        rows = []
+        for u in users:
+            b = leave_balance(u)
+            b["days_left"] = (b["period_end"] - today()).days
+            rows.append((u, b, comp_balance(u)))
+        rows.sort(key=lambda x: x[1]["period_end"])            # 기간 종료가 가까운 순
+        expiring = [x for x in rows if x[1]["days_left"] <= 60 and x[1]["remain"] > 0]
+        return render_template("admin_leave.html", rows=rows, adjs=adjs, expiring=expiring)
 
     @app.route("/admin/settings", methods=["GET", "POST"])
     @role_required("admin")

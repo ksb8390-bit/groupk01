@@ -199,3 +199,12 @@ def test_no_500_on_any_page_for_each_role(app):
         c = app.test_client(); login(c, who)
         for u in urls:
             assert c.get(u).status_code in (200, 403), (who, u)
+
+
+def test_admin_leave_shows_expiring_period(app):
+    with app.app_context():
+        db = get_db(); db.execute("UPDATE users SET hire_date='2024-12-01' WHERE login_id='kim'"); db.commit()
+    a = app.test_client(); login(a, "admin")
+    page = a.get("/admin/leave").get_data(as_text=True)
+    # 기준일 2026-11-10 → kim 기간 2025-12-01~2026-11-30 (D-20)
+    assert "60일 안에 연차 기간이 끝나는 직원" in page and "2026-11-30 종료 (D-20)" in page
