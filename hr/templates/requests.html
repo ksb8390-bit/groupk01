@@ -14,6 +14,10 @@
     <div class="row" data-for="leave">
       <label>단위<select name="unit">{% for k, v in UNIT.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
     </div>
+    <div class="row" data-for="hours">
+      <label>시작 시각<input type="time" name="leave_start" step="1800" value="16:00"></label>
+      <label>사용 시간<select name="leave_hours">{% for h in range(1, DAY_HOURS) %}<option value="{{ h }}" {{ 'selected' if h==2 }}>{{ h }}시간 ({{ '%g'|format(h / DAY_HOURS) }}일)</option>{% endfor %}</select></label>
+    </div>
     <div data-for="holiday">
       <label>근무 시간<select name="wunit">{% for k, v in hw_units.items() %}<option value="{{ k }}">{{ v }}</option>{% endfor %}</select></label>
       <p class="small muted">토·일요일 또는 등록된 휴일에 근무한 날을 선택하세요. 승인되면 대체휴가가 종일 {{ '%g'|format(comp_ratio) }}일 / 반일 {{ '%g'|format(comp_ratio/2) }}일 적립되고, '대체휴가'로 평일에 사용할 수 있습니다.</p>
@@ -40,7 +44,7 @@
     <tbody>
     {% for r in rows %}
     <tr>
-      <td>{{ KIND[r.kind] }}{% if r.unit not in ('full','hours') %}<small> {{ ALL_UNITS[r.unit] }}</small>{% endif %}</td>
+      <td>{{ KIND[r.kind] }}{% if r.unit != 'full' and (r.kind in leave_kinds or r.unit=='half') %}<small> {{ unit_label(r) }}</small>{% endif %}</td>
       <td class="small">{{ r.start_date[5:] }}{% if r.end_date!=r.start_date %}~{{ r.end_date[5:] }}{% endif %}
         {% if r.kind=='correction' %}<br>{{ r.corr_in or '' }}~{{ r.corr_out or '' }}{% endif %}</td>
       <td>{% if r.kind=='holiday_work' %}+{{ '%g'|format(r.days) }}일 적립{% elif r.days %}{{ '%g'|format(r.days) }}일{% elif r.minutes %}{{ hm(r.minutes) }}{% endif %}</td>
@@ -57,7 +61,7 @@
 {% endblock %}
 {% block script %}
 <script>
-const LEAVE = {{ leave_kinds|list|tojson }};
+const LEAVE = {{ leave_kinds|list|tojson }}, HOURK = {{ HOUR_UNIT_KINDS|list|tojson }};
 const kind = document.getElementById('kind'), unit = document.querySelector('[name=unit]');
 function sync(){
   const k = kind.value, isLeave = LEAVE.includes(k);
@@ -68,6 +72,9 @@ function sync(){
   show('[data-for=holiday]', k === 'holiday_work');
   show('[data-for=comp]', k === 'comp');
   document.querySelector('[data-label=date]').textContent = k === 'holiday_work' ? '근무일' : (k === 'correction' || k === 'overtime' ? '대상일' : '시작일');
+  const hOpt = unit.querySelector('option[value=hours]'); hOpt.hidden = hOpt.disabled = !HOURK.includes(k);
+  if (hOpt.disabled && unit.value === 'hours') unit.value = 'full';
+  show('[data-for=hours]', isLeave && unit.value === 'hours');
   show('[data-for=range]', (isLeave && unit.value === 'full') || k === 'field');
 }
 kind.onchange = unit.onchange = sync; sync();

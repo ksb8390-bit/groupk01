@@ -39,16 +39,30 @@ KIND_LABELS = {
     "official": "공가",
     "comp": "대체휴가",
     "unpaid": "무급휴가",
+    "reward": "포상휴가",
+    "maternity": "출산휴가",
     "holiday_work": "휴일근무(대체휴가 적립)",
     "overtime": "연장근무",
     "field": "외근·출장",
     "correction": "근태정정",
 }
-LEAVE_KINDS = ("annual", "sick", "family", "official", "comp", "unpaid")
+LEAVE_KINDS = ("annual", "sick", "family", "official", "comp", "unpaid", "reward", "maternity")
+HOUR_UNIT_KINDS = ("annual", "comp")          # 시간 단위로 쓸 수 있는 휴가
+DAY_HOURS = 8                                 # 1일 = 8시간 (시간 단위 연차 환산)
 DEDUCT_KINDS = ("annual",)
-UNIT_LABELS = {"full": "종일", "am": "오전반차", "pm": "오후반차", "quarter": "반반차"}
+UNIT_LABELS = {"full": "종일", "am": "오전반차", "pm": "오후반차", "quarter": "반반차", "hours": "시간 단위"}
 HW_UNITS = {"full": "종일(8시간)", "half": "반일(4시간)"}   # 휴일근무 단위
-ALL_UNITS = {**UNIT_LABELS, "half": "반일", "hours": ""}
+ALL_UNITS = {**UNIT_LABELS, "half": "반일"}
+
+
+def unit_label(r) -> str:
+    """신청 단위 표시: 시간 단위면 '2시간 16:00~18:00'."""
+    if r["unit"] == "hours" and r["minutes"]:
+        h = f"{r['minutes'] / 60:g}시간"
+        st = r["start_time"] if "start_time" in r.keys() else None
+        et = r["end_time"] if "end_time" in r.keys() else None
+        return h + (f" {st}~{et}" if st and et else "")
+    return ALL_UNITS.get(r["unit"], "")
 STATUS_LABELS = {"pending": "대기", "approved": "승인", "rejected": "반려", "canceled": "취소"}
 WORK_TYPES = {"office": "사무실", "field": "현장", "remote": "재택", "trip": "출장"}
 ROLE_LABELS = {"admin": "관리자", "manager": "부서장", "employee": "직원"}
@@ -240,7 +254,7 @@ def overlapping_request(user_id, kind, unit, sd: date, ed: date):
             "SELECT * FROM requests WHERE user_id=? AND status IN ('pending','approved') "
             f"AND kind IN ({','.join('?' * len(LEAVE_KINDS))}) AND start_date<=? AND end_date>=?",
             (user_id, *LEAVE_KINDS, ed.isoformat(), sd.isoformat())).fetchall():
-        if unit == "full" or r["unit"] == "full" or r["unit"] == unit:
+        if unit == "full" or r["unit"] == "full" or (r["unit"] == unit and unit != "hours"):
             return r
     return None
 
@@ -381,6 +395,7 @@ def _register_filters(app: Flask):
             "me": current_user(),
             "csrf_token": _csrf_token,
             "KIND": KIND_LABELS, "UNIT": UNIT_LABELS, "ALL_UNITS": ALL_UNITS, "STATUS": STATUS_LABELS,
+            "unit_label": unit_label, "HOUR_UNIT_KINDS": HOUR_UNIT_KINDS, "DAY_HOURS": DAY_HOURS,
             "WORK_TYPES": WORK_TYPES, "ROLES": ROLE_LABELS,
             "company": setting("company_name"),
             "hm": rules.fmt_hm,
@@ -617,7 +632,7 @@ def _register_routes(app: Flask):
             total += mins
             if rec and rec["late_min"]:
                 late_cnt += 1
-            labels = [KIND_LABELS[r["kind"]] + ("" if r["unit"] == "full" else f"({ALL_UNITS.get(r['unit'], '')})")
+            labels = [KIND_LABELS[r["kind"]] + ("" if r["unit"] == "full" else f"({unit_label(r)})")
                       for r in reqs if r["start_date"] <= iso <= r["end_date"]]
             days.append({"date": d, "rec": rec, "minutes": mins, "labels": labels,
                          "holiday": hol.get(iso), "weekend": d.weekday() >= 5})
@@ -647,11 +662,26 @@ def _register_routes(app: Flask):
                 unit = request.form.get("wunit") if request.form.get("wunit") in HW_UNITS else "full"
             elif unit not in UNIT_LABELS or kind not in LEAVE_KINDS:
                 unit = "full" if kind in LEAVE_KINDS else "hours"
+            elif unit == "hours" and kind not in HOUR_UNIT_KINDS:
+                unit = "full"
             if unit != "full":
                 ed = sd
             days = rules.leave_days(sd, ed, unit, holiday_set(sd, ed)) if kind in LEAVE_KINDS else 0
             minutes = 0
             corr_in = corr_out = None
+            lv_start = lv_end = None
+            if kind in LEAVE_KINDS and unit == "hours":
+                try:
+                    hrs = int(request.form.get("leave_hours") or 0)
+                except ValueError:
+                    hrs = 0
+                lv_start = valid_hm(request.form.get("leave_start"))
+                if not (1 <= hrs < DAY_HOURS and lv_start):
+                    flash(f"시간 단위 휴가는 시작 시각과 1~{DAY_HOURS - 1}시간을 선택하세요.")
+                    return redirect(url_for("my_requests"))
+                lv_end = (datetime.strptime(lv_start, "%H:%M") + timedelta(hours=hrs)).strftime("%H:%M")
+                minutes = hrs * 60
+                days = 0.0 if (sd.weekday() >= 5 or holiday_set(sd, sd)) else hrs / DAY_HOURS
             if kind == "holiday_work":
                 ed = sd
                 if sd.weekday() < 5 and not holiday_set(sd, sd):
@@ -702,10 +732,10 @@ def _register_routes(app: Flask):
                 flash("선택한 날짜가 주말·휴일이라 휴가를 쓸 필요가 없습니다.")
                 return redirect(url_for("my_requests"))
             db.execute(
-                "INSERT INTO requests(user_id,kind,unit,start_date,end_date,days,minutes,corr_in,corr_out,reason) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO requests(user_id,kind,unit,start_date,end_date,days,minutes,corr_in,corr_out,"
+                "start_time,end_time,reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (me["id"], kind, unit, sd.isoformat(), ed.isoformat(), days, minutes, corr_in, corr_out,
-                 request.form.get("reason", "").strip()))
+                 lv_start, lv_end, request.form.get("reason", "").strip()))
             db.commit()
             flash(f"{KIND_LABELS[kind]} 신청 완료 — 결재 대기")
             return redirect(url_for("my_requests"))

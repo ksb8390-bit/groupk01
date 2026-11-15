@@ -142,3 +142,98 @@ def test_cli_import_employees(app, tmp_path):
     assert "신규 3명, 갱신 2명" in r.output and out.exists()
     with app.app_context():
         assert get_db().execute("SELECT COUNT(*) c FROM users").fetchone()["c"] == 6   # 기존 3 + 신규 3
+
+
+# ---------------------------------------------------------------- 휴가 가져오기 · 시간 단위 연차
+def _xlsx(header, rows):
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(header)
+    for r in rows:
+        ws.append(r)
+    b = io.BytesIO(); wb.save(b); b.seek(0)
+    return b
+
+
+def leave_report(rows):
+    return _xlsx(["이름", "입사일", "휴가 그룹", "산정 기간", "총 휴가 일수", "사용한 휴가 일수", "남은 휴가 일수", "휴가 날짜"], rows)
+
+
+def leave_records(rows):
+    return _xlsx(["직원", "본조직", "조직들", "휴가 그룹", "휴가 유형", "시작 시간", "종료 시간", "유급 시간", "차감 일수",
+                  "사유", "생성일자", "마지막 수정일자"], rows)
+
+
+def test_import_leaves_records_and_balance(app):
+    from hr.app import leave_balance
+    recs = leave_records([
+        ["kim", "설계", "설계", "연차휴가", "연차(개인사정)", "2026-03-06 00:00:00", "2026-03-06 23:59:59", "8:00:00", "1", "개인", "", ""],
+        ["kim", "설계", "설계", "연차휴가", "연차(시간)", "2026-04-02 16:00:00", "2026-04-02 18:00:00", "2:00:00", "0.25", "병원", "", ""],
+        ["kim", "설계", "설계", "연차휴가", "오후반차", "2026-05-02 13:00:00", "2026-05-02 18:00:00", "5:00:00", "0.625", "", "", ""],
+        ["kim", "설계", "설계", "경조휴가(결혼)", "결혼", "2026-06-01 00:00:00", "2026-06-05 23:59:59", "1 day, 0:00:00", "0", "", "", ""],
+        ["nobody", "설계", "설계", "연차휴가", "연차(개인사정)", "2026-03-06 00:00:00", "2026-03-06 23:59:59", "8:00:00", "1", "", "", ""],
+    ])
+    rep = leave_report([
+        ["kim", "2024-03-01", "연차휴가", "2026.01.01 - 11.15", "15", "3.875", "11.125", ""],   # 앱 계산 13.125 → 조정 -2
+        ["kim", "2024-03-01", "무급휴가", "발생 건 없음", "0", "0", "0", ""],
+    ])
+    recs_b, rep_b = recs.getvalue(), rep.getvalue()
+    a = app.test_client(); tok = login(a, "admin")
+    r = a.post("/admin/import/leaves", data={"csrf": tok, "files": [(io.BytesIO(recs_b), "SHIFTEE-LEAVES.xlsx"),
+                                                                    (io.BytesIO(rep_b), "REPORT.xlsx")]},
+               content_type="multipart/form-data")
+    page = r.get_data(as_text=True)
+    assert "휴가 내역 <b>4건</b>" in page and "nobody" in page
+    with app.app_context():
+        db = get_db()
+        rows = {(x["kind"], x["unit"], x["start_time"]): x for x in db.execute("SELECT * FROM requests").fetchall()}
+        assert rows[("annual", "hours", "16:00")]["minutes"] == 120 and rows[("annual", "hours", "16:00")]["days"] == 0.25
+        assert rows[("annual", "hours", "13:00")]["minutes"] == 300 and rows[("annual", "hours", "13:00")]["days"] == 0.625
+        assert rows[("family", "full", None)]["days"] == 5 and rows[("family", "full", None)]["status"] == "approved"
+        u = db.execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        assert leave_balance(u)["remain"] == 11.125
+    # 재실행: 중복 없음, 잔여 그대로
+    a.post("/admin/import/leaves", data={"csrf": tok, "files": [(io.BytesIO(recs_b), "a.xlsx"), (io.BytesIO(rep_b), "b.xlsx")]},
+           content_type="multipart/form-data")
+    with app.app_context():
+        db = get_db()
+        assert db.execute("SELECT COUNT(*) c FROM requests").fetchone()["c"] == 4
+        assert db.execute("SELECT COUNT(*) c FROM leave_adjustments").fetchone()["c"] == 1
+        assert leave_balance(db.execute("SELECT * FROM users WHERE login_id='kim'").fetchone())["remain"] == 11.125
+    # 월간 근태에 시간 단위 표시
+    assert "연차(2시간 16:00~18:00)" in a.get("/admin/attendance?user=2&month=2026-04").get_data(as_text=True)
+
+
+def test_cli_import_leaves(app, tmp_path):
+    p = tmp_path / "r.xlsx"
+    p.write_bytes(leave_report([["kim", "2024-03-01", "연차휴가", "2026.01.01 - 11.15", "15", "3", "12", ""]]).getvalue())
+    r = app.test_cli_runner().invoke(args=["import-leaves", str(p)])
+    assert r.exit_code == 0, r.output
+    assert "조정 1명" in r.output
+
+
+def test_hourly_leave_request(app):
+    from hr.app import leave_balance
+    c = app.test_client(); tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "hours", "start_date": "2026-11-16",
+                              "leave_start": "16:00", "leave_hours": "2", "reason": "병원"})
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "hours", "start_date": "2026-11-16",
+                              "leave_start": "09:00", "leave_hours": "1"})                       # 같은 날 시간 연차 2건 허용
+    c.post("/requests", data={"csrf": tok, "kind": "sick", "unit": "hours", "start_date": "2026-11-17",
+                              "leave_start": "09:00", "leave_hours": "2"})                       # 병가는 시간 단위 불가 → 종일
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "hours", "start_date": "2026-11-18",
+                              "leave_start": "09:00", "leave_hours": "9"})                       # 범위 밖 → 거부
+    with app.app_context():
+        db = get_db()
+        rows = db.execute("SELECT kind, unit, days, minutes, start_time, end_time FROM requests ORDER BY id").fetchall()
+        assert [tuple(r) for r in rows] == [("annual", "hours", 0.25, 120, "16:00", "18:00"),
+                                            ("annual", "hours", 0.125, 60, "09:00", "10:00"),
+                                            ("sick", "full", 1.0, 0, None, None)]
+    a = app.test_client(); at = login(a, "admin")
+    with app.app_context():
+        ids = [r["id"] for r in get_db().execute("SELECT id FROM requests WHERE kind='annual'").fetchall()]
+    for rid in ids:
+        a.post(f"/admin/requests/{rid}/decide", data={"csrf": at, "decision": "approved"})
+    with app.app_context():
+        u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        assert leave_balance(u)["used"] == 0.375
+    assert "2시간 16:00~18:00" in c.get("/requests").get_data(as_text=True)

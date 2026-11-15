@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS requests (
     minutes INTEGER NOT NULL DEFAULT 0,  -- 연장근무 신청 시간(분)
     corr_in TEXT,                        -- 근태정정: 정정 출근시각 HH:MM
     corr_out TEXT,                       -- 근태정정: 정정 퇴근시각 HH:MM
+    start_time TEXT,                     -- 시간 단위 휴가: 시작 HH:MM
+    end_time TEXT,                       -- 시간 단위 휴가: 종료 HH:MM
     reason TEXT,
     status TEXT NOT NULL DEFAULT 'pending',  -- pending / approved / rejected / canceled
     approver_id INTEGER REFERENCES users(id),
@@ -179,9 +181,18 @@ def close_db(_exc=None):
         conn.close()
 
 
+MIGRATIONS = [   # (테이블, 컬럼, 정의) — 기존 DB에 없는 컬럼 추가
+    ("requests", "start_time", "TEXT"),
+    ("requests", "end_time", "TEXT"),
+]
+
+
 def init_db():
     db = get_db()
     db.executescript(SCHEMA)
+    for table, col, ddl in MIGRATIONS:
+        if col not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
     for k, v in DEFAULT_SETTINGS.items():
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
     if not db.execute("SELECT 1 FROM chat_rooms WHERE kind='all'").fetchone():

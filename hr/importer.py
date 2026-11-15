@@ -286,6 +286,190 @@ def accounts(token):
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+# ================================================================ 휴가 가져오기 (시프티)
+SHIFTEE_NOTE = "시프티 이관"
+
+
+def _cells(row):
+    return [str(c).strip() if c is not None else "" for c in row]
+
+
+def detect_leave_file(data: bytes) -> str | None:
+    """'report'(직원별 휴가 현황) / 'records'(휴가 사용 내역) / None"""
+    import openpyxl
+    ws = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True).worksheets[0]
+    for r in list(ws.iter_rows(values_only=True))[:5]:
+        c = _cells(r)
+        if "남은 휴가 일수" in c and "휴가 그룹" in c:
+            return "report"
+        if "차감 일수" in c and "휴가 유형" in c:
+            return "records"
+    return None
+
+
+def _table(data: bytes, must: str):
+    import openpyxl
+    rows = list(openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True).worksheets[0]
+                .iter_rows(values_only=True))
+    for i, r in enumerate(rows[:5]):
+        c = _cells(r)
+        if must in c:
+            idx = {name: j for j, name in enumerate(c) if name}
+            return idx, [r for r in rows[i + 1:] if r and r[0]]
+    raise ValueError(f"'{must}' 열을 찾지 못했습니다.")
+
+
+def parse_leave_report(data: bytes) -> dict:
+    """이름 → 연차휴가 {total, used, remain, period}"""
+    idx, rows = _table(data, "남은 휴가 일수")
+    out = {}
+    for r in rows:
+        g = lambda k: r[idx[k]] if idx.get(k) is not None and idx[k] < len(r) else None  # noqa: E731
+        if str(g("휴가 그룹") or "").strip() != "연차휴가":
+            continue
+        out[str(g("이름")).strip()] = {"total": float(g("총 휴가 일수") or 0), "used": float(g("사용한 휴가 일수") or 0),
+                                     "remain": float(g("남은 휴가 일수") or 0), "period": str(g("산정 기간") or "")}
+    return out
+
+
+def _minutes(v) -> int:
+    s = str(v or "")
+    m = re.match(r"(?:(\d+) days?, )?(\d+):(\d{2})(?::\d{2})?$", s)
+    if not m:
+        return 0
+    return int(m[1] or 0) * 1440 + int(m[2]) * 60 + int(m[3])
+
+
+def _kind(group: str, typ: str) -> str | None:
+    if group.startswith("연차"):
+        return "annual"
+    if group.startswith("경조"):
+        return "family"
+    if group.startswith("무급"):
+        return "sick" if "병가" in typ else "unpaid"
+    if group.startswith("포상"):
+        return "reward"
+    if group.startswith("출산"):
+        return "maternity"
+    if group.startswith("공가"):
+        return "official"
+    if "대체" in group or "보상" in group:
+        return "comp"
+    return None
+
+
+def parse_leave_records(data: bytes) -> tuple[list[dict], list[str]]:
+    from . import rules
+    idx, rows = _table(data, "차감 일수")
+    out, warns = [], []
+    for n, r in enumerate(rows, start=2):
+        g = lambda k: r[idx[k]] if idx.get(k) is not None and idx[k] < len(r) else None  # noqa: E731
+        name, group, typ = (str(g(k) or "").strip() for k in ("직원", "휴가 그룹", "휴가 유형"))
+        kind = _kind(group, typ)
+        st, et = str(g("시작 시간") or ""), str(g("종료 시간") or "")
+        try:
+            sd, ed = date.fromisoformat(st[:10]), date.fromisoformat(et[:10])
+            days = float(g("차감 일수") or 0)
+        except ValueError:
+            warns.append(f"{n}행 {name}: 날짜·일수 형식 오류 — 건너뜀")
+            continue
+        if not kind:
+            warns.append(f"{n}행 {name}: 알 수 없는 휴가 그룹 '{group}' — 건너뜀")
+            continue
+        t0, t1 = st[11:16], et[11:16]
+        rec = {"name": name, "kind": kind, "type": typ, "start_date": sd.isoformat(), "end_date": ed.isoformat(),
+               "start_time": None, "end_time": None, "minutes": 0, "days": days,
+               "reason": (str(g("사유") or "").strip() or typ)[:300]}
+        if t0 == "00:00" and t1 == "23:59":
+            rec["unit"] = "full"
+            if days == 0 and kind != "annual":
+                rec["days"] = rules.leave_days(sd, ed, "full")
+        elif "반차" in typ and abs(days - 0.5) < 1e-9:
+            rec["unit"] = "am" if t0 < "12:00" else "pm"
+        else:
+            rec.update(unit="hours", start_time=t0, end_time=t1, minutes=_minutes(g("유급 시간")))
+        if typ and typ not in rec["reason"]:
+            rec["reason"] = f"[{typ}] {rec['reason']}"
+        out.append(rec)
+    return out, warns
+
+
+def import_leaves(records: list[dict] | None, report: dict | None, actor_id) -> dict:
+    """휴가 내역 등록(중복 건너뜀) + 연차 잔여를 시프티 값에 맞춤. 여러 번 실행해도 결과 동일."""
+    from .app import leave_balance, now
+    db = get_db()
+    users = {u["name"]: u for u in db.execute("SELECT * FROM users").fetchall()}
+    stamp = now().strftime("%Y-%m-%d %H:%M:%S")
+    res = {"added": 0, "dup": 0, "no_user": set(), "adjusted": [], "matched": 0}
+    for r in records or []:
+        u = users.get(r["name"])
+        if not u:
+            res["no_user"].add(r["name"])
+            continue
+        if db.execute("SELECT 1 FROM requests WHERE user_id=? AND kind=? AND start_date=? AND end_date=? "
+                      "AND COALESCE(start_time,'')=? AND unit=? AND decision_note=?",
+                      (u["id"], r["kind"], r["start_date"], r["end_date"], r["start_time"] or "", r["unit"],
+                       SHIFTEE_NOTE)).fetchone():
+            res["dup"] += 1
+            continue
+        db.execute("INSERT INTO requests(user_id,kind,unit,start_date,end_date,days,minutes,start_time,end_time,reason,"
+                   "status,decided_at,decision_note,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,'approved',?,?,?)",
+                   (u["id"], r["kind"], r["unit"], r["start_date"], r["end_date"], r["days"], r["minutes"],
+                    r["start_time"], r["end_time"], r["reason"], stamp, SHIFTEE_NOTE, stamp))
+        res["added"] += 1
+    for name, rep in (report or {}).items():
+        u = users.get(name)
+        if not u:
+            res["no_user"].add(name)
+            continue
+        db.execute("DELETE FROM leave_adjustments WHERE user_id=? AND reason LIKE ?", (u["id"], SHIFTEE_NOTE + "%"))
+        bal = leave_balance(u)
+        diff = round(rep["remain"] - bal["remain"], 4)
+        if abs(diff) > 1e-9:
+            db.execute("INSERT INTO leave_adjustments(user_id,period_start,days,reason,created_by,created_at) "
+                       "VALUES (?,?,?,?,?,?)",
+                       (u["id"], bal["period_start"].isoformat(), diff,
+                        f"{SHIFTEE_NOTE}: {now():%Y-%m-%d} 기준 시프티 잔여 {rep['remain']:g}일에 맞춤 "
+                        f"(시프티 산정기간 {rep['period']}, 총 {rep['total']:g} / 사용 {rep['used']:g})", actor_id, stamp))
+            res["adjusted"].append((name, bal["remain"], rep["remain"], diff))
+        else:
+            res["matched"] += 1
+    audit(actor_id, "import_leaves", f"내역 {res['added']}건, 잔여조정 {len(res['adjusted'])}명")
+    db.commit()
+    res["no_user"] = sorted(res["no_user"])
+    return res
+
+
+@bp.route("/leaves", methods=["POST"])
+@role_required("admin")
+def leaves():
+    me = current_user()
+    records = report = None
+    warns = []
+    for f in request.files.getlist("files"):
+        if not f or not f.filename:
+            continue
+        data = f.read()
+        try:
+            kind = detect_leave_file(data)
+            if kind == "report":
+                report = parse_leave_report(data)
+            elif kind == "records":
+                records, w = parse_leave_records(data)
+                warns += w
+            else:
+                warns.append(f"{f.filename}: 시프티 휴가 파일 형식이 아닙니다.")
+        except Exception as e:  # noqa: BLE001
+            warns.append(f"{f.filename}: 읽기 실패 ({e})")
+    if records is None and report is None:
+        for w in warns:
+            flash(w)
+        flash("휴가 현황(EMPLOYEE-LEAVE-REPORT) 또는 휴가 내역(LEAVES) 파일을 선택하세요.")
+        return redirect(url_for("imp.index"))
+    res = import_leaves(records, report, me["id"])
+    return render_template("import.html", step="leaves_done", res=res, warns=warns)
+
+
 def register(app):
     app.register_blueprint(bp)
 
@@ -332,3 +516,33 @@ def register(app):
         save_accounts_xlsx(accounts, out)
         click.echo(f"완료: 신규 {created}명, 갱신 {updated}명")
         click.echo(f"임시 비밀번호 파일: {out}  (직원 전달 후 삭제하세요)")
+
+    @app.cli.command("import-leaves")
+    @click.argument("files", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False))
+    def import_leaves_cmd(files):
+        """시프티 휴가 현황(EMPLOYEE-LEAVE-REPORT)·휴가 내역(LEAVES) 엑셀을 가져옵니다."""
+        records = report = None
+        for path in files:
+            with open(path, "rb") as fp:
+                data = fp.read()
+            kind = detect_leave_file(data)
+            if kind == "report":
+                report = parse_leave_report(data)
+                click.echo(f"휴가 현황: {os.path.basename(path)} — 연차 {len(report)}명")
+            elif kind == "records":
+                records, warns = parse_leave_records(data)
+                click.echo(f"휴가 내역: {os.path.basename(path)} — {len(records)}건")
+                for w in warns:
+                    click.echo("경고: " + w)
+            else:
+                click.echo(f"건너뜀(형식 아님): {os.path.basename(path)}")
+        if records is None and report is None:
+            raise click.ClickException("시프티 휴가 파일이 없습니다.")
+        admin = get_db().execute("SELECT id FROM users WHERE role='admin' ORDER BY id LIMIT 1").fetchone()
+        res = import_leaves(records, report, admin["id"] if admin else None)
+        click.echo(f"휴가 내역 등록 {res['added']}건 (이미 있어 건너뜀 {res['dup']}건)")
+        click.echo(f"연차 잔여: 시프티와 일치 {res['matched']}명, 조정 {len(res['adjusted'])}명")
+        for name, before, after, diff in res["adjusted"]:
+            click.echo(f"  {name}: 앱 계산 {before:g}일 → 시프티 잔여 {after:g}일 (조정 {diff:+g})")
+        if res["no_user"]:
+            click.echo("앱에 없는 직원(먼저 import-employees 실행): " + ", ".join(res["no_user"]))
