@@ -39,6 +39,10 @@ def test_send_poll_and_unread(app):
     assert a.get("/chat/unread").get_json()["unread"] == 1
     msgs = a.get(f"/chat/{rid}/messages?after=0").get_json()["messages"]
     assert [m["body"] for m in msgs] == ["현장 도착했습니다"] and msgs[0]["name"] == "kim" and not msgs[0]["mine"]
+    with app.app_context():
+        db = get_db(); db.execute("UPDATE users SET position='과장' WHERE login_id='kim'"); db.commit()
+    m = a.get(f"/chat/{rid}/messages").get_json()["messages"][0]
+    assert m["position"] == "과장" and m["dept"] == "설계팀" and m["user_id"] == 2
     assert a.get("/chat/unread").get_json()["unread"] == 0          # 조회 시 읽음 처리
     assert k.get("/chat/unread").get_json()["unread"] == 0          # 본인 메시지는 안 읽음 수에서 제외
 

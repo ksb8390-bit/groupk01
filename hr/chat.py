@@ -124,6 +124,7 @@ def message_json(m, me) -> dict:
         "user_id": m["user_id"],
         "name": m["name"] or "",
         "dept": m["dept"] or "",
+        "position": m["position"] or "",
         "body": "" if deleted else (m["body"] or ""),
         "lat": None if deleted else m["lat"],
         "lon": None if deleted else m["lon"],
@@ -136,7 +137,7 @@ def message_json(m, me) -> dict:
 
 
 def fetch_messages(room_id, me, after=0, before=None):
-    sql = ("SELECT m.*, u.name, d.name AS dept FROM chat_messages m LEFT JOIN users u ON u.id=m.user_id "
+    sql = ("SELECT m.*, u.name, u.position, d.name AS dept FROM chat_messages m LEFT JOIN users u ON u.id=m.user_id "
            "LEFT JOIN departments d ON d.id=u.department_id WHERE m.room_id=?")
     args: list = [room_id]
     if before:
@@ -270,10 +271,10 @@ def room(rid):
         mark_read(rid, me["id"], msgs[-1]["id"])
         db.commit()
     if r["kind"] == "all":
-        members = db.execute("SELECT u.id, u.name, d.name AS dept FROM users u LEFT JOIN departments d "
+        members = db.execute("SELECT u.id, u.name, u.position, d.name AS dept FROM users u LEFT JOIN departments d "
                              "ON d.id=u.department_id WHERE u.active=1 ORDER BY u.name").fetchall()
     else:
-        members = db.execute("SELECT u.id, u.name, d.name AS dept FROM chat_members cm JOIN users u ON u.id=cm.user_id "
+        members = db.execute("SELECT u.id, u.name, u.position, d.name AS dept FROM chat_members cm JOIN users u ON u.id=cm.user_id "
                              "LEFT JOIN departments d ON d.id=u.department_id WHERE cm.room_id=? AND u.active=1 "
                              "ORDER BY u.name", (rid,)).fetchall()
     others = []
@@ -451,6 +452,19 @@ def unread():
 def register(app):
     app.register_blueprint(bp)
     app.config.setdefault("MAX_CONTENT_LENGTH", MAX_PHOTO_BYTES + 512 * 1024)
+
+    @app.template_filter("initials")
+    def _initials(name):
+        """프로필 동그라미 글자: 한글 3~4자 이름은 뒤 두 글자, 그 외는 첫 글자 (화면 JS와 동일 규칙)."""
+        n = (name or "?").strip()
+        if 3 <= len(n) <= 4 and all("가" <= ch <= "힣" for ch in n):
+            return n[-2:]
+        return n[:1].upper()
+
+    @app.template_filter("avcolor")
+    def _avcolor(uid):
+        colors = ["#3b6ea8", "#2e8b57", "#b0603a", "#7a5ab5", "#c0476b", "#2a8a96", "#8a7a2e", "#5a6b7d"]
+        return colors[(uid or 0) % len(colors)]
 
     @app.context_processor
     def _chat_ctx():

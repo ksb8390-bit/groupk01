@@ -9,7 +9,7 @@
   <b>{{ room.name }}</b>
   <details style="position:relative"><summary class="small muted">{{ members|length }}명</summary>
     <div class="card" style="position:absolute;right:0;top:24px;width:260px;max-height:60vh;overflow:auto;z-index:9">
-      <ul class="list small">{% for m in members %}<li>{{ m.name }} <span class="muted">{{ m.dept or '' }}</span>
+      <ul class="list small">{% for m in members %}<li><span class="mem"><span class="av sm" style="background:{{ m.id|avcolor }}">{{ m.name|initials }}</span><span>{{ m.name }}{% if m.position %} {{ m.position }}{% endif %}{% if m.dept %}<span class="muted"> · {{ m.dept }}</span>{% endif %}</span></span>
         {% if manage and room.kind!='all' and m.id != me.id %}
         <form method="post" action="{{ url_for('chat.members', rid=room.id) }}" class="inline">
           <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="user_id" value="{{ m.id }}">
@@ -87,10 +87,32 @@
   function dayLabel(d) { const x = new Date(d + 'T00:00:00'); return `${d.replace(/-/g, '.')} (${WD[x.getDay()]})`; }
   function mapUrl(name, lat, lon) { return `https://map.kakao.com/link/map/${encodeURIComponent(name)},${lat},${lon}`; }
 
-  function render(m) {
-    const w = el('div', `msg k-${m.kind}${m.mine ? ' mine' : ''}`); w.dataset.id = m.id;
+  // 프로필 동그라미: 한글 3자 이상 이름은 뒤 두 글자(예: 김설계 → 설계), 그 외는 첫 글자
+  const AV_COLORS = ['#3b6ea8', '#2e8b57', '#b0603a', '#7a5ab5', '#c0476b', '#2a8a96', '#8a7a2e', '#5a6b7d'];
+  function avatar(m) {
+    const n = (m.name || '?').trim(), kor = /^[가-힣]{3,4}$/.test(n);
+    const a = el('div', 'av', kor ? n.slice(-2) : n.slice(0, 1).toUpperCase());
+    a.style.background = AV_COLORS[(m.user_id || 0) % AV_COLORS.length]; a.title = n; return a;
+  }
+  function whoLine(m) {
+    const w = el('div', 'who'); w.appendChild(el('b', null, m.name));
+    if (m.position) w.appendChild(document.createTextNode(' ' + m.position));
+    if (m.dept) w.appendChild(el('span', 'muted', ' · ' + m.dept));
+    return w;
+  }
+  // 같은 사람이 같은 날 1분 이내에 연달아 보낸 메시지는 프로필·이름 생략
+  const groupKey = m => (m.kind === 'system' || m.kind === 'deleted') ? null : `${m.user_id}|${m.date}|${m.time}`;
+  function render(m, prev) {
+    const w = el('div', `msg k-${m.kind}${m.mine ? ' mine' : ' other'}`); w.dataset.id = m.id; w.dataset.g = groupKey(m) || '';
     if (m.kind === 'system' || m.kind === 'deleted') { w.appendChild(el('div', 'bub', m.kind === 'deleted' ? '삭제된 메시지입니다' : m.body)); return w; }
-    if (!m.mine) w.appendChild(el('div', 'who', m.name + (m.dept ? ' · ' + m.dept : '')));
+    let col = w;
+    if (!m.mine) {
+      const cont = prev && prev.dataset && prev.dataset.g && prev.dataset.g === groupKey(m);
+      if (cont) w.classList.add('cont');
+      w.appendChild(cont ? el('div', 'av sp') : avatar(m));
+      col = el('div', 'col'); w.appendChild(col);
+      if (!cont) col.appendChild(whoLine(m));
+    }
     const row = el('div', 'row2'), bub = el('div', 'bub');
     if (m.kind === 'photo') {
       const a = el('a'); a.href = m.photo; a.target = '_blank'; const img = el('img'); img.src = m.photo; img.loading = 'lazy'; img.alt = '사진';
@@ -106,7 +128,7 @@
     row.appendChild(bub);
     const meta = el('div'); meta.appendChild(el('div', 't', m.time));
     if (m.can_delete) { const d = el('button', 'del', '삭제'); d.type = 'button'; d.onclick = () => del(m.id); meta.appendChild(d); }
-    row.appendChild(meta); w.appendChild(row); return w;
+    row.appendChild(meta); col.appendChild(row); return w;
   }
   const app = document.getElementById('chatApp');
   function nearBottom() { return box.scrollTop + box.clientHeight >= box.scrollHeight - 160; }
@@ -116,14 +138,19 @@
     for (const m of list) {
       if (m.id <= lastId) continue;
       if (m.date !== lastDate) { box.appendChild(el('div', 'day', dayLabel(m.date))); lastDate = m.date; if (!firstDate) firstDate = m.date; }
-      box.appendChild(render(m)); lastId = m.id; if (!firstId) firstId = m.id;
+      const prev = box.lastElementChild && box.lastElementChild.classList.contains('msg') ? box.lastElementChild : null;
+      box.appendChild(render(m, prev)); lastId = m.id; if (!firstId) firstId = m.id;
     }
     if (stick) toBottom();
   }
   function prepend(list) {
     const h = box.scrollHeight, anchor = olderBtn.parentNode.nextSibling;
     const frag = document.createDocumentFragment(); let d = '';
-    for (const m of list) { if (m.date !== d) { frag.appendChild(el('div', 'day', dayLabel(m.date))); d = m.date; } frag.appendChild(render(m)); }
+    let prev = null;
+    for (const m of list) {
+      if (m.date !== d) { frag.appendChild(el('div', 'day', dayLabel(m.date))); d = m.date; prev = null; }
+      prev = render(m, prev); frag.appendChild(prev);
+    }
     if (anchor && anchor.classList && anchor.classList.contains('day') && anchor.textContent === dayLabel(d)) anchor.remove();
     box.insertBefore(frag, olderBtn.parentNode.nextSibling);
     if (list.length) firstId = list[0].id;
