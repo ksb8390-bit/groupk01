@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block body %}
+{% if me.role in ('admin','manager') %}
+<section class="card">
+  <h2>공지 작성</h2>
+  <form method="post" action="{{ url_for('add_notice') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input name="title" placeholder="제목" required>
+    <textarea name="body" rows="3" placeholder="내용" required></textarea>
+    <button class="btn primary">등록</button>
+  </form>
+</section>
+{% endif %}
+{% for n in rows %}
+<article class="card" id="n{{ n.id }}">
+  <h2>{{ n.title }}</h2>
+  <p class="small muted">{{ n.author or '' }} · {{ n.created_at[:16] }}</p>
+  <p class="pre">{{ n.body }}</p>
+  {% if me.role=='admin' %}<form method="post" action="{{ url_for('del_notice', nid=n.id) }}" onsubmit="return confirm('삭제할까요?')">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="link">삭제</button></form>{% endif %}
+</article>
+{% else %}<section class="card muted">공지사항이 없습니다.</section>{% endfor %}
+{% endblock %}

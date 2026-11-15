@@ -1,0 +1,65 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <h1>회사 설정</h1>
+  <form method="post" class="formgrid">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="company">
+    <label>회사명<input name="company_name" value="{{ s.company_name }}"></label>
+    <label>기본 출근시각<input type="time" name="work_start" value="{{ s.work_start }}"></label>
+    <label>기본 퇴근시각<input type="time" name="work_end" value="{{ s.work_end }}"></label>
+    <label>휴게시간(분)<input type="number" name="break_min" value="{{ s.break_min }}"></label>
+    <label class="check"><input type="checkbox" name="late_check" {{ 'checked' if s.late_check=='1' }}> 지각 판정 사용 (출근시각이 정해진 경우만. 선택근무제·코어타임 없음 → 끔)</label>
+    <label>지각 유예(분) — 지각 판정 사용 시 출근시각 + 이 시간까지 지각 아님<input type="number" name="late_grace_min" value="{{ s.late_grace_min }}"></label>
+    <label>대체휴가 적립 배율 (휴일근무 1일당)<select name="comp_ratio">
+      <option value="1" {{ 'selected' if s.comp_ratio in ('1','1.0') }}>1.0일 — 휴일대체(1:1)</option>
+      <option value="1.5" {{ 'selected' if s.comp_ratio == '1.5' }}>1.5일 — 보상휴가(가산 50% 포함)</option>
+    </select></label>
+    <label class="check"><input type="checkbox" name="require_location" {{ 'checked' if s.require_location=='1' }}> '사무실' 출근은 근무지 반경 내에서만 허용</label>
+    <div><button class="btn primary">저장</button></div>
+  </form>
+</section>
+<section class="card">
+  <h2>사무실 Wi‑Fi 출근 인증</h2>
+  <p class="small">사무실 Wi‑Fi에 연결된 휴대폰은 사무실 인터넷 주소(공인 IP)로 접속합니다. 이 주소를 등록하면 GPS 없이도 출근 기록에 '사무실 Wi‑Fi'로 표시되고, '근무지 확인 필수' 설정 시에도 출근이 허용됩니다.</p>
+  <p class="small">지금 접속한 주소: <b>{{ my_ip }}</b> {% if my_ip_ok %}<span class="st approved">등록된 사무실 네트워크</span>{% else %}<span class="st">미등록</span>{% endif %}<br>
+  <span class="muted">사무실 Wi‑Fi에 연결된 상태에서 아래 '현재 주소 추가'를 누르면 됩니다. 통신사 회선의 IP가 바뀌면 다시 등록하세요(고정 IP 회선 권장).</span></p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="office_network">
+    <label>표시 이름<input name="office_network_name" value="{{ s.office_network_name or '사무실 Wi‑Fi' }}" maxlength="30"></label>
+    <label>사무실 IP 목록 (한 줄에 하나, 대역은 192.168.1.0/24 형식)<textarea name="office_networks" rows="3">{{ s.office_networks or '' }}</textarea></label>
+    <div class="row"><button class="btn primary small">저장</button>
+      <button class="btn small" name="add_current" value="1">현재 주소 추가</button></div>
+  </form>
+</section>
+<section class="card">
+  <h2>근무지 (위치 확인 기준)</h2>
+  <ul class="list">{% for w in workplaces %}<li>{{ w.name }} <small class="muted">{{ w.lat }}, {{ w.lon }} · 반경 {{ w.radius_m }}m</small>
+    <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_del"><input type="hidden" name="id" value="{{ w.id }}"><button class="link">삭제</button></form></li>{% endfor %}</ul>
+  <form method="post" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_add">
+    <input name="name" placeholder="근무지명 (본사, ○○현장)" required>
+    <input name="lat" placeholder="위도 33.xxx" required><input name="lon" placeholder="경도 126.xxx" required>
+    <input name="radius_m" type="number" value="200" style="width:6em"> m
+    <button type="button" class="btn small" id="here">현재위치</button>
+    <button class="btn primary small">추가</button>
+  </form>
+</section>
+<section class="card">
+  <h2>휴일 (공휴일·회사휴무)</h2>
+  <p class="small muted">등록된 휴일은 연차 사용일수 계산에서 제외됩니다. 매년 초 관공서 공휴일·대체공휴일·임시공휴일을 등록하세요.</p>
+  <ul class="list small">{% for h in holidays %}<li>{{ h.day }} {{ h.name }}
+    <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="holiday_del"><input type="hidden" name="day" value="{{ h.day }}"><button class="link">삭제</button></form></li>{% endfor %}</ul>
+  <form method="post" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="holiday_add">
+    <input type="date" name="day" required><input name="name" placeholder="명칭" required><button class="btn primary small">추가</button>
+  </form>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+document.getElementById('here').onclick = () => navigator.geolocation.getCurrentPosition(p => {
+  document.querySelector('[name=lat]').value = p.coords.latitude.toFixed(6);
+  document.querySelector('[name=lon]').value = p.coords.longitude.toFixed(6);
+}, e => alert('위치를 가져오지 못했습니다: ' + e.message));
+</script>
+{% endblock %}

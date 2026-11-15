@@ -1,0 +1,249 @@
+{% extends 'base.html' %}
+{% block title %}{{ room.name }} · {{ company }}{% endblock %}
+{% block bodyclass %}chat{% endblock %}
+{% block bottomnav %}{% endblock %}
+{% block body %}
+<div class="chat-app" id="chatApp">
+<div class="chat-head">
+  <a class="back" href="{{ url_for('chat.index') }}" aria-label="대화 목록">‹</a>
+  <b>{{ room.name }}</b>
+  <details style="position:relative"><summary class="small muted">{{ members|length }}명</summary>
+    <div class="card" style="position:absolute;right:0;top:24px;width:260px;max-height:60vh;overflow:auto;z-index:9">
+      <ul class="list small">{% for m in members %}<li><span class="mem"><span class="av sm" style="background:{{ m.id|avcolor }}">{{ m.name|initials }}</span><span>{{ m.name }}{% if m.position %} {{ m.position }}{% endif %}{% if m.dept %}<span class="muted"> · {{ m.dept }}</span>{% endif %}</span></span>
+        {% if manage and room.kind!='all' and m.id != me.id %}
+        <form method="post" action="{{ url_for('chat.members', rid=room.id) }}" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="user_id" value="{{ m.id }}">
+          <input type="hidden" name="action" value="remove"><button class="link">내보내기</button></form>{% endif %}</li>{% endfor %}</ul>
+      {% if manage and others %}
+      <form method="post" action="{{ url_for('chat.members', rid=room.id) }}" class="row" style="margin-top:8px">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="action" value="add">
+        <select name="user_id">{% for u in others %}<option value="{{ u.id }}">{{ u.name }}{% if u.dept %} · {{ u.dept }}{% endif %}</option>{% endfor %}</select>
+        <button class="btn small">초대</button></form>
+      {% endif %}
+      {% if room.kind!='all' %}
+      <div class="row" style="margin-top:8px">
+        <form method="post" action="{{ url_for('chat.leave', rid=room.id) }}" onsubmit="return confirm('대화방에서 나갈까요?')">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="link">나가기</button></form>
+        {% if manage %}<form method="post" action="{{ url_for('chat.archive', rid=room.id) }}" onsubmit="return confirm('대화방을 닫을까요? 내용은 보관됩니다.')">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}"><button class="link">대화방 닫기</button></form>{% endif %}
+      </div>
+      {% endif %}
+    </div>
+  </details>
+</div>
+
+<div class="msgs" id="msgs">
+  <div style="text-align:center"><button class="link small" id="older" hidden>이전 대화 더 보기</button></div>
+</div>
+
+<div class="composer">
+  <div class="tray" id="tray" hidden>
+    <button type="button" class="btn" id="btnLoc">📍 내 위치 공유</button>
+    <button type="button" class="btn" id="btnPhoto">📷 사진</button>
+    <button type="button" class="btn" id="btnStatus">🚶 외근·외출 알림</button>
+    <input type="file" id="photo" accept="image/*" hidden>
+  </div>
+  <form class="sheet" id="statusSheet" hidden>
+    <div class="chip-row">
+      {% for k, v in STATUS.items() %}<label><input type="radio" name="status" value="{{ k }}" {{ 'checked' if k=='visit' }}><span>{{ STATUS_ICONS[k] }} {{ v }}</span></label>{% endfor %}
+    </div>
+    <div class="row">
+      <label>장소<input name="place" maxlength="60" placeholder="예: 제주시청 건축과"></label>
+      <label>복귀 예정<input type="time" name="eta"></label>
+    </div>
+    <label>업무 내용<input name="note" maxlength="300" placeholder="예: 허가 협의 후 복귀"></label>
+    <label class="check"><input type="checkbox" name="withLoc"> 현재 위치 함께 보내기</label>
+    <button class="btn primary wide">이 대화방에 알리기</button>
+  </form>
+  <div class="in">
+    <button type="button" class="plus" id="plus" aria-label="더보기">＋</button>
+    <textarea id="body" rows="1" maxlength="2000" placeholder="메시지 입력"></textarea>
+    <button type="button" class="btn primary send" id="send">전송</button>
+  </div>
+</div>
+</div>
+{% endblock %}
+{% block script %}
+<script>
+(function () {
+  const RID = {{ room.id }}, ME = {{ me.id }};
+  const URL_MSG = '{{ url_for("chat.messages", rid=room.id) }}', URL_SEND = '{{ url_for("chat.send", rid=room.id) }}';
+  const URL_STATUS = '{{ url_for("chat.update_status") }}', URL_DEL = '{{ url_for("chat.delete", rid=room.id, mid=0) }}'.replace(/0$/, '');
+  const CSRF = document.querySelector('meta[name=csrf]').content;
+  const box = document.getElementById('msgs'), olderBtn = document.getElementById('older');
+  let lastId = 0, firstId = 0, lastDate = '', firstDate = '', busy = false;
+  const WD = '일월화수목금토';
+
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  function linkify(parent, text) {
+    const re = /(https?:\/\/[^\s]+)/g; let i = 0, m;
+    while ((m = re.exec(text))) {
+      parent.appendChild(document.createTextNode(text.slice(i, m.index)));
+      const a = el('a', null, m[0]); a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer'; parent.appendChild(a);
+      i = m.index + m[0].length;
+    }
+    parent.appendChild(document.createTextNode(text.slice(i)));
+  }
+  function dayLabel(d) { const x = new Date(d + 'T00:00:00'); return `${d.replace(/-/g, '.')} (${WD[x.getDay()]})`; }
+  function mapUrl(name, lat, lon) { return `https://map.kakao.com/link/map/${encodeURIComponent(name)},${lat},${lon}`; }
+
+  // 프로필 동그라미: 한글 3자 이상 이름은 뒤 두 글자(예: 김설계 → 설계), 그 외는 첫 글자
+  const AV_COLORS = ['#3b6ea8', '#2e8b57', '#b0603a', '#7a5ab5', '#c0476b', '#2a8a96', '#8a7a2e', '#5a6b7d'];
+  function avatar(m) {
+    const n = (m.name || '?').trim(), kor = /^[가-힣]{3,4}$/.test(n);
+    const a = el('div', 'av', kor ? n.slice(-2) : n.slice(0, 1).toUpperCase());
+    a.style.background = AV_COLORS[(m.user_id || 0) % AV_COLORS.length]; a.title = n; return a;
+  }
+  function whoLine(m) {
+    const w = el('div', 'who'); w.appendChild(el('b', null, m.name));
+    if (m.position) w.appendChild(document.createTextNode(' ' + m.position));
+    if (m.dept) w.appendChild(el('span', 'muted', ' · ' + m.dept));
+    return w;
+  }
+  // 같은 사람이 같은 날 1분 이내에 연달아 보낸 메시지는 프로필·이름 생략
+  const groupKey = m => (m.kind === 'system' || m.kind === 'deleted') ? null : `${m.user_id}|${m.date}|${m.time}`;
+  function render(m, prev) {
+    const w = el('div', `msg k-${m.kind}${m.mine ? ' mine' : ' other'}`); w.dataset.id = m.id; w.dataset.g = groupKey(m) || '';
+    if (m.kind === 'system' || m.kind === 'deleted') { w.appendChild(el('div', 'bub', m.kind === 'deleted' ? '삭제된 메시지입니다' : m.body)); return w; }
+    let col = w;
+    if (!m.mine) {
+      const cont = prev && prev.dataset && prev.dataset.g && prev.dataset.g === groupKey(m);
+      if (cont) w.classList.add('cont');
+      w.appendChild(cont ? el('div', 'av sp') : avatar(m));
+      col = el('div', 'col'); w.appendChild(col);
+      if (!cont) col.appendChild(whoLine(m));
+    }
+    const row = el('div', 'row2'), bub = el('div', 'bub');
+    if (m.kind === 'photo') {
+      const a = el('a'); a.href = m.photo; a.target = '_blank'; const img = el('img'); img.src = m.photo; img.loading = 'lazy'; img.alt = '사진';
+      a.appendChild(img); bub.appendChild(a); if (m.body) { const c = el('div'); c.style.marginTop = '6px'; linkify(c, m.body); bub.appendChild(c); }
+    } else {
+      linkify(bub, m.body);
+      if (m.lat != null && m.lon != null) {
+        bub.appendChild(document.createElement('br'));
+        const a = el('a', 'map', '📍 지도에서 보기'); a.href = mapUrl(m.name + ' 위치', m.lat, m.lon); a.target = '_blank'; a.rel = 'noopener noreferrer';
+        bub.appendChild(a);
+      }
+    }
+    row.appendChild(bub);
+    const meta = el('div'); meta.appendChild(el('div', 't', m.time));
+    if (m.can_delete) { const d = el('button', 'del', '삭제'); d.type = 'button'; d.onclick = () => del(m.id); meta.appendChild(d); }
+    row.appendChild(meta); col.appendChild(row); return w;
+  }
+  const app = document.getElementById('chatApp');
+  function nearBottom() { return box.scrollTop + box.clientHeight >= box.scrollHeight - 160; }
+  function toBottom() { box.scrollTop = box.scrollHeight; }
+  function append(list, scroll) {
+    const stick = scroll || nearBottom();
+    for (const m of list) {
+      if (m.id <= lastId) continue;
+      if (m.date !== lastDate) { box.appendChild(el('div', 'day', dayLabel(m.date))); lastDate = m.date; if (!firstDate) firstDate = m.date; }
+      const prev = box.lastElementChild && box.lastElementChild.classList.contains('msg') ? box.lastElementChild : null;
+      box.appendChild(render(m, prev)); lastId = m.id; if (!firstId) firstId = m.id;
+    }
+    if (stick) toBottom();
+  }
+  function prepend(list) {
+    const h = box.scrollHeight, anchor = olderBtn.parentNode.nextSibling;
+    const frag = document.createDocumentFragment(); let d = '';
+    let prev = null;
+    for (const m of list) {
+      if (m.date !== d) { frag.appendChild(el('div', 'day', dayLabel(m.date))); d = m.date; prev = null; }
+      prev = render(m, prev); frag.appendChild(prev);
+    }
+    if (anchor && anchor.classList && anchor.classList.contains('day') && anchor.textContent === dayLabel(d)) anchor.remove();
+    box.insertBefore(frag, olderBtn.parentNode.nextSibling);
+    if (list.length) firstId = list[0].id;
+    box.scrollTop = box.scrollHeight - h;
+  }
+  async function api(url, opts) {
+    const r = await fetch(url, Object.assign({credentials: 'same-origin', headers: {'X-CSRF': CSRF, 'X-Requested-With': 'fetch'}}, opts || {}));
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || '전송하지 못했습니다. 연결을 확인하세요.');
+    return j;
+  }
+  async function poll() {
+    if (busy || document.hidden) return; busy = true;
+    try { const j = await api(`${URL_MSG}?after=${lastId}`); append(j.messages); } catch (e) {} finally { busy = false; }
+  }
+  async function sendForm(fd) {
+    try { const j = await api(URL_SEND, {method: 'POST', body: fd}); append(j.messages, true); }
+    catch (e) { alert(e.message); }
+  }
+  async function del(id) {
+    if (!confirm('메시지를 삭제할까요?')) return;
+    try { await api(URL_DEL + id, {method: 'POST'}); const n = box.querySelector(`[data-id="${id}"]`); if (n) n.replaceWith(render({id, kind: 'deleted'})); }
+    catch (e) { alert(e.message); }
+  }
+
+  // 키보드가 올라오면 보이는 영역(visualViewport) 높이로 대화 화면을 줄이고 마지막 메시지 유지
+  const vv = window.visualViewport;
+  function fit() {
+    if (!vv) return;
+    const stick = nearBottom();
+    app.style.height = vv.height + 'px';
+    app.style.top = vv.offsetTop + 'px';
+    app.classList.toggle('kb', vv.height < window.innerHeight - 120);
+    if (stick) toBottom();
+  }
+  if (vv) { vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); }
+  window.addEventListener('orientationchange', () => setTimeout(fit, 300));
+
+  // 초기 메시지
+  fit();
+  append({{ msgs|tojson }}, true);
+  olderBtn.hidden = {{ 'false' if msgs|length >= 80 else 'true' }};
+  olderBtn.onclick = async () => {
+    const j = await api(`${URL_MSG}?before=${firstId}`); prepend(j.messages); if (j.messages.length < 80) olderBtn.hidden = true;
+  };
+  setInterval(poll, 3000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
+
+  // 텍스트
+  const body = document.getElementById('body');
+  const autosize = () => { body.style.height = 'auto'; body.style.height = Math.min(body.scrollHeight, 120) + 'px'; };
+  body.addEventListener('input', () => { const s = nearBottom(); autosize(); if (s) toBottom(); });
+  body.addEventListener('focus', () => { setTimeout(() => { fit(); toBottom(); }, 300); });
+  const sendText = () => { const t = body.value.trim(); if (!t) return; const fd = new FormData(); fd.append('body', t); body.value = ''; autosize(); sendForm(fd); };
+  document.getElementById('send').onclick = sendText;
+  body.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && window.matchMedia('(pointer:fine)').matches) { e.preventDefault(); sendText(); } });
+
+  // 더보기 트레이
+  const tray = document.getElementById('tray'), sheet = document.getElementById('statusSheet');
+  document.getElementById('plus').onclick = () => { tray.hidden = !tray.hidden; if (tray.hidden) sheet.hidden = true; };
+  const getPos = () => new Promise((ok, no) => navigator.geolocation ? navigator.geolocation.getCurrentPosition(p => ok(p.coords), no, {enableHighAccuracy: true, timeout: 10000}) : no(new Error('위치 기능 없음')));
+
+  document.getElementById('btnLoc').onclick = async () => {
+    if (!confirm('현재 위치를 이 대화방 참여자에게 보낼까요?')) return;
+    try { const c = await getPos(); const fd = new FormData(); fd.append('lat', c.latitude); fd.append('lon', c.longitude);
+      fd.append('body', body.value.trim() || '현재 위치'); body.value = ''; tray.hidden = true; sendForm(fd); }
+    catch (e) { alert('위치를 가져오지 못했습니다. 휴대폰 설정에서 브라우저 위치 권한을 허용하세요.'); }
+  };
+
+  const photo = document.getElementById('photo');
+  document.getElementById('btnPhoto').onclick = () => photo.click();
+  photo.onchange = async () => {
+    const f = photo.files[0]; photo.value = ''; if (!f) return; tray.hidden = true;
+    let blob = f;
+    try {   // 휴대폰 사진을 긴 변 1600px JPEG로 줄여서 전송
+      const img = await createImageBitmap(f); const k = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas'); cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      blob = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.82)) || f;
+    } catch (e) {}
+    const fd = new FormData(); fd.append('photo', blob, 'photo.jpg'); const cap = body.value.trim(); if (cap) { fd.append('body', cap); body.value = ''; }
+    sendForm(fd);
+  };
+
+  document.getElementById('btnStatus').onclick = () => { sheet.hidden = !sheet.hidden; };
+  sheet.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const fd = new FormData(sheet); fd.append('room_id', RID);
+    if (fd.get('withLoc')) { try { const c = await getPos(); fd.append('lat', c.latitude); fd.append('lon', c.longitude); } catch (e) { alert('위치 없이 보냅니다.'); } }
+    fd.delete('withLoc');
+    try { await api(URL_STATUS, {method: 'POST', body: fd}); sheet.reset(); sheet.hidden = true; tray.hidden = true; poll(); }
+    catch (e) { alert(e.message); }
+  });
+})();
+</script>
+{% endblock %}

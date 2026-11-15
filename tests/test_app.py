@@ -1,0 +1,263 @@
+import re
+from datetime import datetime
+
+import pytest
+from werkzeug.security import generate_password_hash
+
+from hr.app import create_app
+from hr.db import get_db
+
+CLOCK = {"now": datetime(2026, 11, 10, 9, 5)}  # 화요일
+
+
+@pytest.fixture
+def app(tmp_path):
+    app = create_app({"TESTING": True, "DATABASE": str(tmp_path / "t.db"), "SECRET_KEY": "x",
+                      "NOW": lambda: CLOCK["now"]})
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO departments(name) VALUES ('설계팀')")
+        for login, role, hire in (("admin", "admin", "2020-01-01"), ("kim", "employee", "2024-03-01"),
+                                  ("lee", "manager", "2021-05-01")):
+            db.execute("INSERT INTO users(login_id,password_hash,name,role,department_id,hire_date,must_change_pw) "
+                       "VALUES (?,?,?,?,1,?,0)", (login, generate_password_hash("pw123456"), login, role, hire))
+        db.execute("INSERT INTO workplaces(name,lat,lon,radius_m) VALUES ('본사',33.4996,126.5312,200)")
+        db.execute("UPDATE settings SET value='1' WHERE key='late_check'")   # 지각 판정 테스트용(회사 기본값은 끔)
+        db.commit()
+    return app
+
+
+def login(client, who):
+    page = client.get("/login").get_data(as_text=True)
+    token = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+    r = client.post("/login", data={"login_id": who, "password": "pw123456", "csrf": token})
+    assert r.status_code == 302
+    return token
+
+
+def test_requires_login(app):
+    assert app.test_client().get("/").status_code == 302
+
+
+def test_csrf_enforced(app):
+    c = app.test_client()
+    login(c, "kim")
+    assert c.post("/punch", data={"action": "in"}).status_code == 400
+
+
+def test_punch_flow_with_geofence(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    c.post("/consent", data={"csrf": tok, "agree": "1"})
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 15)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office", "lat": "33.4997", "lon": "126.5313"})
+    CLOCK["now"] = datetime(2026, 11, 10, 18, 30)
+    c.post("/punch", data={"csrf": tok, "action": "out", "lat": "33.4997", "lon": "126.5313"})
+    with app.app_context():
+        r = get_db().execute("SELECT * FROM attendance").fetchone()
+        assert r["late_min"] == 15 and r["in_place"] == "본사" and r["check_out"].endswith("18:30:00")
+    assert "8:15" in c.get("/").get_data(as_text=True)  # 9:15~18:30 - 1h
+
+
+def test_require_location_blocks_office_outside(app):
+    with app.app_context():
+        get_db().execute("UPDATE settings SET value='1' WHERE key='require_location'")
+        get_db().commit()
+    c = app.test_client()
+    tok = login(c, "kim")
+    c.post("/consent", data={"csrf": tok, "agree": "1"})
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office", "lat": "33.30", "lon": "126.30"})
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.30", "lon": "126.30"})
+    with app.app_context():
+        rows = get_db().execute("SELECT work_type FROM attendance").fetchall()
+        assert [r["work_type"] for r in rows] == ["field"]
+
+
+def test_leave_request_approval_and_balance(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    # 2026-11-16(월)~11-18(수) 3일
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "full",
+                              "start_date": "2026-11-16", "end_date": "2026-11-18", "reason": "개인"})
+    m = app.test_client()
+    mt = login(m, "lee")
+    with app.app_context():
+        rid = get_db().execute("SELECT id, days FROM requests").fetchone()
+        assert rid["days"] == 3
+    r = m.post(f"/admin/requests/{rid['id']}/decide", data={"csrf": mt, "decision": "approved"})
+    assert r.status_code == 302
+    with app.app_context():
+        from hr.app import leave_balance
+        from flask import session  # noqa
+        u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        b = leave_balance(u)
+        assert b["granted"] == 15 and b["used"] == 3 and b["remain"] == 12
+
+
+def test_insufficient_leave_rejected(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "full",
+                              "start_date": "2026-11-16", "end_date": "2026-12-31"})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) c FROM requests").fetchone()["c"] == 0
+
+
+def test_employee_cannot_access_admin(app):
+    c = app.test_client()
+    login(c, "kim")
+    assert c.get("/admin").status_code == 403
+    assert c.get("/admin/users").status_code == 403
+
+
+def test_correction_applies_on_approval(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "correction", "start_date": "2026-11-09",
+                              "corr_in": "08:55", "corr_out": "18:10", "reason": "현장 직행"})
+    a = app.test_client()
+    at = login(a, "admin")
+    with app.app_context():
+        rid = get_db().execute("SELECT id FROM requests").fetchone()["id"]
+    a.post(f"/admin/requests/{rid}/decide", data={"csrf": at, "decision": "approved"})
+    with app.app_context():
+        r = get_db().execute("SELECT * FROM attendance WHERE work_date='2026-11-09'").fetchone()
+        assert r["check_in"] == "2026-11-09 08:55:00" and r["late_min"] == 0
+
+
+def test_admin_pages_and_export(app):
+    a = app.test_client()
+    login(a, "admin")
+    for url in ("/admin", "/admin/approvals", "/admin/attendance", "/admin/attendance?user=2",
+                "/admin/users", "/admin/leave", "/admin/settings", "/admin/audit", "/notices",
+                "/requests", "/my/attendance", "/manifest.webmanifest", "/sw.js"):
+        assert a.get(url).status_code == 200, url
+    r = a.get("/admin/export?month=2026-11")
+    assert r.status_code == 200 and r.data[:2] == b"PK"
+
+
+def test_create_user_forces_password_change(app):
+    a = app.test_client()
+    at = login(a, "admin")
+    r = a.post("/admin/users", data={"csrf": at, "login_id": "park", "password": "temp1234", "name": "박",
+                                     "role": "employee", "hire_date": "2026-11-01"}, follow_redirects=True)
+    assert "park" in r.get_data(as_text=True)
+    p = app.test_client()
+    page = p.get("/login").get_data(as_text=True)
+    tok = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+    p.post("/login", data={"login_id": "park", "password": "temp1234", "csrf": tok})
+    assert "/password" in p.get("/").headers["Location"]
+
+
+def test_late_grace_default_10_minutes(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 10)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    with app.app_context():
+        assert get_db().execute("SELECT late_min FROM attendance").fetchone()["late_min"] == 0
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 5)
+
+
+def _approve_all(app):
+    a = app.test_client()
+    at = login(a, "admin")
+    with app.app_context():
+        ids = [r["id"] for r in get_db().execute("SELECT id FROM requests WHERE status='pending'").fetchall()]
+    for rid in ids:
+        a.post(f"/admin/requests/{rid}/decide", data={"csrf": at, "decision": "approved"})
+
+
+def test_holiday_work_accrues_comp_leave(app):
+    from hr.app import comp_balance, leave_balance
+    c = app.test_client()
+    tok = login(c, "kim")
+    # 평일(화)에는 휴일근무 신청 불가
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "full", "start_date": "2026-11-10"})
+    # 대체휴가 잔여 없이 사용 신청 불가
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "full", "start_date": "2026-11-16"})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) c FROM requests").fetchone()["c"] == 0
+    # 토요일 종일 + 일요일 반일 근무 → 1.5일 적립
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "full", "start_date": "2026-11-07",
+                              "reason": "현장 타설"})
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "half", "start_date": "2026-11-08"})
+    _approve_all(app)
+    # 2일 사용은 잔여 초과 → 거부, 1일 + 오전반차 사용은 가능
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "full",
+                              "start_date": "2026-11-16", "end_date": "2026-11-17"})
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "full", "start_date": "2026-11-16"})
+    c.post("/requests", data={"csrf": tok, "kind": "comp", "unit": "am", "start_date": "2026-11-17"})
+    _approve_all(app)
+    with app.app_context():
+        u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        cb = comp_balance(u)
+        assert (cb["earned"], cb["used"], cb["remain"]) == (1.5, 1.5, 0)
+        assert leave_balance(u)["used"] == 0  # 연차와 별도
+    page = c.get("/requests").get_data(as_text=True)
+    assert "+1일 적립" in page and "대체휴가 잔여 <b>0일</b>" in page
+
+
+def test_holiday_work_on_registered_holiday_and_ratio(app):
+    from hr.app import comp_balance
+    with app.app_context():
+        db = get_db()
+        db.execute("INSERT INTO holidays(day,name) VALUES ('2026-11-11','창립기념일')")
+        db.execute("UPDATE settings SET value='1.5' WHERE key='comp_ratio'")
+        db.commit()
+    c = app.test_client()
+    tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "holiday_work", "wunit": "full", "start_date": "2026-11-11"})
+    _approve_all(app)
+    with app.app_context():
+        u = get_db().execute("SELECT * FROM users WHERE login_id='kim'").fetchone()
+        assert comp_balance(u)["earned"] == 1.5
+
+
+def test_no_late_on_weekend_or_morning_half_day(app):
+    c = app.test_client()
+    tok = login(c, "kim")
+    # 토요일 14시 출근 → 지각 아님
+    CLOCK["now"] = datetime(2026, 11, 14, 14, 0)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field"})
+    # 월요일 오전반차 승인 후 14시 출근 → 지각 아님
+    CLOCK["now"] = datetime(2026, 11, 13, 9, 0)
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "am", "start_date": "2026-11-16"})
+    _approve_all(app)
+    CLOCK["now"] = datetime(2026, 11, 16, 14, 0)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    # 화요일 오후반차는 오전 출근 기준 그대로 → 09:20 출근은 지각 20분
+    CLOCK["now"] = datetime(2026, 11, 17, 9, 20)
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    with app.app_context():
+        rows = {r["work_date"]: r["late_min"] for r in get_db().execute("SELECT * FROM attendance").fetchall()}
+    assert rows == {"2026-11-14": 0, "2026-11-16": 0, "2026-11-17": 20}
+    CLOCK["now"] = datetime(2026, 11, 10, 9, 5)
+
+
+def test_late_check_off_by_default_hides_late(tmp_path):
+    from hr.app import create_app
+    app2 = create_app({"TESTING": True, "DATABASE": str(tmp_path / "d.db"), "SECRET_KEY": "x",
+                       "NOW": lambda: datetime(2026, 11, 10, 11, 30)})
+    with app2.app_context():
+        db = get_db()
+        assert db.execute("SELECT value FROM settings WHERE key='late_check'").fetchone()["value"] == "0"
+        db.execute("INSERT INTO users(login_id,password_hash,name,role,hire_date,must_change_pw) VALUES "
+                   "('kim',?,'kim','admin','2024-03-01',0)", (generate_password_hash("pw123456"),))
+        db.commit()
+    c = app2.test_client(); tok = login(c, "kim")
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})   # 11:30 출근
+    with app2.app_context():
+        assert get_db().execute("SELECT late_min FROM attendance").fetchone()["late_min"] == 0
+    home = c.get("/").get_data(as_text=True)
+    assert "출퇴근 시각 자율" in home and "지각" not in home
+    assert "<span>지각</span>" not in c.get("/admin").get_data(as_text=True)
+    import openpyxl, io
+    ws = openpyxl.load_workbook(io.BytesIO(c.get("/admin/export?month=2026-11").data)).worksheets[0]
+    assert "지각횟수" not in [x.value for x in ws[1]]
+    # 설정에서 켜기
+    c.post("/admin/settings", data={"csrf": tok, "section": "company", "company_name": "G", "work_start": "09:00",
+                                    "work_end": "18:00", "break_min": "60", "late_grace_min": "10",
+                                    "comp_ratio": "1", "late_check": "on"})
+    with app2.app_context():
+        assert get_db().execute("SELECT value FROM settings WHERE key='late_check'").fetchone()["value"] == "1"

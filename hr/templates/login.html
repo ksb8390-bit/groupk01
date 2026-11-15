@@ -1,0 +1,13 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card narrow">
+  <h1>로그인</h1>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <label>아이디<input name="login_id" autocomplete="username" required autofocus></label>
+    <label>비밀번호<input name="password" type="password" autocomplete="current-password" required></label>
+    <button class="btn primary wide">로그인</button>
+  </form>
+  <p class="muted small">계정·비밀번호 분실 시 관리자에게 문의하세요.</p>
+</section>
+{% endblock %}

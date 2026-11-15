@@ -3,3 +3,8 @@ jeju_filtered.csv
 all_raw.csv
 __pycache__/
 *.pyc
+instance/
+backup/
+*.sqlite3
+.venv/
+.pytest_cache/

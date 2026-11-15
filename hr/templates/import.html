@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+{% block body %}
+{% if step == 'upload' %}
+<section class="card">
+  <h1>직원 가져오기</h1>
+  <p class="small">시프티 관리자 화면에서 내려받은 <b>직원 목록 엑셀</b>(SHIFTEE-EMPLOYEES-….xlsx)을 그대로 올리면 됩니다.
+  '이름, 입사일, 부서, 직위, 아이디, 권한, 연락처' 열이 있는 자체 엑셀도 가능합니다.</p>
+  <ul class="small muted">
+    <li>같은 이름의 계정이 이미 있으면 새로 만들지 않고 부서·직위·입사일만 갱신합니다.</li>
+    <li>다음 화면에서 아이디·권한을 확인·수정한 뒤 적용합니다. 이 단계에서는 아직 아무것도 저장되지 않습니다.</li>
+    <li>적용 후 <b>임시 비밀번호 엑셀</b>을 한 번만 내려받을 수 있습니다.</li>
+  </ul>
+  <form method="post" action="{{ url_for('imp.preview') }}" enctype="multipart/form-data" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="file" name="file" accept=".xlsx" required>
+    <button class="btn primary">미리보기</button>
+  </form>
+</section>
+<section class="card">
+  <h2>휴가 가져오기 (시프티)</h2>
+  <p class="small">시프티에서 내려받은 <b>직원별 휴가 현황</b>(SHIFTEE-EMPLOYEE-LEAVE-REPORT-….xlsx)과 <b>휴가 내역</b>(SHIFTEE-LEAVES-….xlsx)을 함께 선택하세요. 직원을 먼저 가져온 뒤 실행합니다.</p>
+  <ul class="small muted">
+    <li>휴가 내역은 '승인 완료'로 등록됩니다(시간 단위 연차 포함). 이미 가져온 건은 건너뜁니다.</li>
+    <li>연차 잔여는 시프티의 '남은 휴가 일수'와 같아지도록 '연차 조정'을 자동으로 넣습니다. 다시 실행하면 조정을 새로 계산합니다.</li>
+  </ul>
+  <form method="post" action="{{ url_for('imp.leaves') }}" enctype="multipart/form-data" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <input type="file" name="files" accept=".xlsx" multiple required>
+    <button class="btn primary">휴가 가져오기</button>
+  </form>
+</section>
+{% elif step == 'leaves_done' %}
+<section class="card">
+  <h1>휴가 가져오기 완료</h1>
+  {% for w in warns %}<div class="notice">{{ w }}</div>{% endfor %}
+  <p>휴가 내역 <b>{{ res.added }}건</b> 등록{% if res.dup %} (이미 있어 건너뜀 {{ res.dup }}건){% endif %}<br>
+  연차 잔여: 시프티와 일치 <b>{{ res.matched }}명</b>, 조정 <b>{{ res.adjusted|length }}명</b></p>
+  {% if res.adjusted %}
+  <div class="tablewrap"><table><thead><tr><th>이름</th><th>앱 계산 잔여</th><th>시프티 잔여</th><th>조정</th></tr></thead>
+  <tbody>{% for n, b, a, d in res.adjusted %}<tr><td>{{ n }}</td><td>{{ '%g'|format(b) }}</td><td><b>{{ '%g'|format(a) }}</b></td><td>{{ '%+g'|format(d) }}</td></tr>{% endfor %}</tbody></table></div>
+  {% endif %}
+  {% if res.no_user %}<div class="notice">앱에 없는 직원: {{ res.no_user|join(', ') }} — 직원을 먼저 가져오세요.</div>{% endif %}
+  <p><a href="{{ url_for('admin_leave') }}">연차 현황 보기</a></p>
+</section>
+{% elif step == 'preview' %}
+<section class="card">
+  <h1>가져오기 미리보기 <small class="muted">{{ rows|length }}명</small></h1>
+  {% for w in warns %}<div class="notice">{{ w }}</div>{% endfor %}
+  <p class="small">새로 만들 부서: {% for d in depts %}<b>{{ d }}</b>{{ ', ' if not loop.last }}{% else %}없음{% endfor %}</p>
+  <p class="small muted">권한 기본값: 대표이사 → 관리자, 본부장 → 부서장(소속 본부 결재), 그 외 → 직원. 아이디는 시프티 사원번호(없으면 gk01…)로 제안했습니다. 직원이 기억하기 쉬운 아이디로 바꿔도 됩니다.</p>
+  <form method="post" action="{{ url_for('imp.apply') }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="token" value="{{ token }}">
+    <div class="tablewrap"><table>
+      <thead><tr><th>포함</th><th>처리</th><th>이름</th><th>아이디</th><th>권한</th><th>부서</th><th>직위</th><th>입사일</th></tr></thead>
+      <tbody>{% for r in rows %}{% set i = loop.index0 %}
+      <tr class="{{ 'off' if r.leave_date }}">
+        <td><input type="checkbox" name="inc_{{ i }}" value="1" {{ 'checked' if r.include is not defined or r.include }} style="width:auto"></td>
+        <td><span class="st {{ 'approved' if r.action=='create' else 'pending' }}">{{ '신규' if r.action=='create' else '갱신' }}</span>{% if r.leave_date %}<br><small>퇴사 {{ r.leave_date }}</small>{% endif %}</td>
+        <td>{{ r.name }}{% if r.rename_from and r.rename_from != r.name %}<br><small class="muted">기존 관리자 계정({{ r.login_id }})에 연결 · 이름 '{{ r.rename_from }}' → '{{ r.name }}'</small>{% endif %}</td>
+        <td>{% if r.action=='create' %}<input name="login_{{ i }}" value="{{ r.login_id }}" style="width:9em;margin:0;padding:6px">{% else %}{{ r.login_id }}{% endif %}</td>
+        <td><select name="role_{{ i }}" style="width:auto;margin:0;padding:6px">{% for k, v in ROLES.items() %}<option value="{{ k }}" {{ 'selected' if r.role==k }}>{{ v }}</option>{% endfor %}</select></td>
+        <td class="small">{{ r.dept or '-' }}</td><td class="small">{{ r.position or '' }}</td><td class="small">{{ r.hire_date }}</td>
+      </tr>{% endfor %}</tbody>
+    </table></div>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary">적용</button> <a href="{{ url_for('imp.index') }}">취소</a>
+    </div>
+  </form>
+</section>
+{% else %}
+<section class="card">
+  <h1>가져오기 완료</h1>
+  <p>신규 계정 <b>{{ created }}명</b>, 기존 계정 갱신 <b>{{ updated }}명</b></p>
+  <p><a class="btn primary" href="{{ url_for('imp.accounts', token=token) }}">임시 비밀번호 엑셀 내려받기 (1회)</a></p>
+  <ul class="small muted">
+    <li>이 파일은 <b>한 번만</b> 내려받을 수 있습니다. 직원에게 각자 아이디·임시 비밀번호를 전달한 뒤 파일을 삭제하세요.</li>
+    <li>직원은 첫 로그인 때 비밀번호를 바꿔야 합니다.</li>
+    <li>연차 잔여는 입사일 기준으로 자동 계산됩니다. 시프티 잔여와 다르면 <a href="{{ url_for('admin_leave') }}">연차</a> 메뉴의 '연차 조정'으로 맞추세요.</li>
+  </ul>
+  <a href="{{ url_for('admin_users') }}">직원 목록 보기</a>
+</section>
+{% endif %}
+{% endblock %}
