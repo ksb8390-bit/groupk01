@@ -786,7 +786,12 @@ def cmd_cleanup_apply(args, cfg):
     with open(log_path, "w", newline="", encoding="utf-8-sig") as lf:
         log = csv.writer(lf)
         log.writerow(["결과", "구분", "경로", "크기(bytes)", "사유"])
+        t_start = time.time()
         for i, r in enumerate(rows, 1):
+            if i % 50 == 0 or i == 1:
+                el = time.time() - t_start
+                eta = el / i * (len(rows) - i) if i > 1 else 0
+                print(f"\r  … {i:,}/{len(rows):,}  경과 {el / 60:,.1f}분  남은 예상 {eta / 60:,.1f}분   ", end="", flush=True)
             path, kind, ref = r["경로"], r["구분"], (r.get("보존본/원본 경로") or "")
             size, mt = int(float(r["_bytes"] or 0)), float(r["_mtime"] or 0)
             real = _exists_any(path)
@@ -813,9 +818,9 @@ def cmd_cleanup_apply(args, cfg):
             stat[res][0] += 1
             stat[res][1] += size if res in ("삭제", "삭제예정") else 0
             log.writerow([res, kind, path, size, why])
-            if i % 1000 == 0:
+            if i % 50 == 0:
                 lf.flush()
-                print(f"  … {i:,}/{len(rows):,}")
+    print()
     print(f"[{'완료' if args.apply else '미리보기'}]")
     for k, (c, b) in stat.items():
         print(f"  {k:<6} {c:>9,}건  {human(b) if b else ''}")
@@ -872,9 +877,17 @@ def main():
     if not HAS_OPENPYXL:
         print("[안내] openpyxl 미설치 → CSV로 저장합니다 (pip install openpyxl)")
     t0 = time.time()
+    try:
+        _run(args, cfg)
+    except KeyboardInterrupt:
+        print("\n[중단] 사용자가 멈췄습니다(control+C). 처리된 부분까지는 기록 파일에 남아 있고, 같은 명령을 다시 실행하면 이어서 진행됩니다.")
+        sys.exit(130)
+    print(f"[소요] {time.time() - t0:,.1f}초")
+
+
+def _run(args, cfg):
     {"init": cmd_init, "lint": cmd_lint, "report": cmd_report, "dupes": cmd_dupes,
      "cleanup": cmd_cleanup, "cleanup-apply": cmd_cleanup_apply}[args.cmd](args, cfg)
-    print(f"[소요] {time.time() - t0:,.1f}초")
 
 
 if __name__ == "__main__":
