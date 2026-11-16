@@ -25,7 +25,7 @@ fi
 source .venv/bin/activate
 
 echo "== 3/4 필요한 패키지 확인"
-if ! python -c "import flask, openpyxl, reportlab, gunicorn" 2>/dev/null; then
+if ! python -c "import flask, openpyxl, gunicorn, reportlab.pdfgen" 2>/dev/null; then
   pip install -q -r requirements.txt || { echo "패키지 설치 실패 — 인터넷 연결을 확인하세요."; exit 1; }
 fi
 
