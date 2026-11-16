@@ -18,6 +18,7 @@ GroupK NAS(QNAP QTS) 관리 자동화 스크립트
                  ① 중복: 1개만 보존 ② 백업·임시: 같은 폴더에 원본 있을 때만 ③ 압축: 전부 풀려 있을 때만
   cleanup-apply  검토·수정한 계획서대로 삭제 (기본 미리보기, --apply 시 실제 삭제)
   cleanup-all    공유폴더 바로 아래 폴더들을 하나씩 계획→삭제 (완료 목록 기록, 이어하기 가능)
+  compare        폴더 A(휴지통·옛 사본)의 파일이 폴더 B(실제 자료)에 이미 있는지 대조
 
 공통
   - QNAP 시스템 폴더(@Recycle, .@__thumb, @Recently-Snapshot, .streams 등)는 자동 제외
@@ -164,7 +165,7 @@ def path_bytes(p):
     return len(unicodedata.normalize("NFD", p).encode("utf-8"))
 
 
-def walk(root, cfg, errors=None):
+def walk(root, cfg, errors=None, skip=()):
     """시스템 폴더를 제외하고 (dirpath, filename, full_path, stat) 생성.
     읽지 못한 파일·폴더는 errors 리스트에 (경로, 사유, 경로바이트) 로 기록 (화면에는 처음 3건만 표시)"""
     ex_dirs, ex_files = cfg["exclude_dirs"], cfg["exclude_files"]
@@ -181,7 +182,8 @@ def walk(root, cfg, errors=None):
 
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: note(e.filename or "", e)):
         dirnames[:] = [d for d in dirnames
-                       if not d.startswith((".@", "@")) and not _match_any(d, ex_dirs)]
+                       if not d.startswith((".@", "@")) and not _match_any(d, ex_dirs)
+                       and not (skip and unicodedata.normalize("NFC", os.path.join(dirpath, d)) in skip)]
         for fn in filenames:
             if _match_any(fn, ex_files):
                 continue
@@ -909,6 +911,84 @@ def cmd_cleanup_all(args, cfg):
 
 
 # =========================
+# 8-3. compare : 폴더 A(예: 휴지통·옛 사본)가 폴더 B(실제 자료)에 이미 있는지 대조 — 파일 변경 없음
+# =========================
+
+def cmd_compare(args, cfg):
+    src, dst = os.path.abspath(args.src), os.path.abspath(args.dst)
+    nfc = lambda p: unicodedata.normalize("NFC", p)
+    now = time.time()
+    index = {}
+    if args.deep:
+        print(f"[1/2] 기준 폴더 색인(파일명+크기) : {dst}")
+        k = 0
+        for _, fn, full, st in walk(dst, cfg, [], skip={nfc(src)}):
+            index.setdefault((nfc(fn).lower(), st.st_size), full)
+            k += 1
+            if k % 50000 == 0:
+                print(f"  … {k:,}개")
+        print(f"  색인 {k:,}개")
+
+    print(f"[{'2/2' if args.deep else '1/1'}] 대조 : {src}  →  {dst}")
+    cats = ("동일(같은 경로)", "동일(다른 위치)", "크기 다름", "내용 다름", "유일본(기준 폴더에 없음)")
+    tot = {c: [0, 0] for c in cats}
+    by_top = defaultdict(lambda: {**{c: [0, 0] for c in cats}, "최근수정": 0.0})
+    detail, errors = [], []
+    n = 0
+    for _, fn, full, st in walk(src, cfg, errors):
+        n += 1
+        if n % 20000 == 0:
+            print(f"  … {n:,}개")
+        rel = os.path.relpath(full, src)
+        top = rel.split(os.sep)[0] if os.sep in rel else "(루트 파일)"
+        if valid_mtime(st.st_mtime, now):
+            by_top[top]["최근수정"] = max(by_top[top]["최근수정"], st.st_mtime)
+        other = _exists_any(os.path.join(dst, rel))
+        where = other or ""
+        if other and os.path.isfile(other):
+            if os.path.getsize(other) != st.st_size:
+                cat = "크기 다름"
+            elif args.hash and _hash(full) != _hash(other):
+                cat = "내용 다름"
+            else:
+                cat = "동일(같은 경로)"
+        else:
+            hit = index.get((nfc(fn).lower(), st.st_size)) if args.deep else None
+            if hit and (not args.hash or _hash(full) == _hash(hit)):
+                cat, where = "동일(다른 위치)", hit
+            else:
+                cat, where = "유일본(기준 폴더에 없음)", ""
+        tot[cat][0] += 1; tot[cat][1] += st.st_size
+        by_top[top][cat][0] += 1; by_top[top][cat][1] += st.st_size
+        if not cat.startswith("동일"):
+            detail.append((cat, full, round(st.st_size / 1024 ** 2, 2), ts(st.st_mtime), where))
+
+    gb = lambda b: round(b / 1024 ** 3, 2)
+    all_b = sum(v[1] for v in tot.values()) or 1
+    sum_rows = [(c, v[0], gb(v[1]), round(v[1] / all_b * 100, 1)) for c, v in tot.items()]
+    top_rows = []
+    for t, d in sorted(by_top.items(), key=lambda kv: -sum(v[1] for k, v in kv[1].items() if k != "최근수정")):
+        same = d["동일(같은 경로)"][1] + d["동일(다른 위치)"][1]
+        uniq = d["유일본(기준 폴더에 없음)"][1] + d["크기 다름"][1] + d["내용 다름"][1]
+        top_rows.append((t, gb(same + uniq), gb(same), gb(uniq),
+                         round(same / (same + uniq) * 100, 1) if same + uniq else 0,
+                         ts(d["최근수정"]) if d["최근수정"] else ""))
+
+    print(f"\n[결과] {src}\n  파일 {n:,}개 / 읽기실패 {len(errors):,}개")
+    for c, cnt, g, pct in sum_rows:
+        print(f"  {c:<18} {cnt:>9,}개 {g:>10,.2f} GB  {pct:>5}%")
+    if not args.deep:
+        print("  ※ 위치가 바뀐 파일은 '유일본'으로 잡힘 → 정확히 보려면 --deep (기준 폴더 전체 색인)")
+    detail.sort(key=lambda r: (r[0], -r[2]))
+    write_sheets("compare", {
+        "요약": (["구분", "파일수", "용량(GB)", "비율(%)"], sum_rows),
+        "1차폴더별": (["폴더", "전체(GB)", "기준에 있음(GB)", "없음·다름(GB)", "중복률(%)", "최근수정"], top_rows),
+        "유일본·다름": (["구분", "경로", "크기(MB)", "수정일", "기준 폴더 쪽 경로"], detail[:1_000_000]),
+        "읽기실패": (ERR_SHEET_HEADER, errors),
+    })
+
+
+# =========================
 # 9. 진입점
 # =========================
 
@@ -944,6 +1024,12 @@ def main():
     p.add_argument("--yes", action="store_true", help="확인 질문 생략")
     p.add_argument("--verify", action="store_true", help="중복 삭제 직전 보존본과 전체 해시 재대조")
 
+    p = sub.add_parser("compare", help="폴더 A의 파일이 폴더 B에 이미 있는지 대조 (파일 변경 없음)")
+    p.add_argument("src", help="확인할 폴더 (예: 휴지통·옛 사본)")
+    p.add_argument("dst", help="기준 폴더 (실제 자료)")
+    p.add_argument("--deep", action="store_true", help="기준 폴더 전체를 파일명+크기로 색인해 위치가 바뀐 파일도 찾음")
+    p.add_argument("--hash", action="store_true", help="동일 판정 시 전체 해시까지 비교 (느림, 정확)")
+
     p = sub.add_parser("cleanup-all", help="하위 폴더(연도 등)를 하나씩 계획→삭제. 중단 후 재실행 시 완료 폴더는 건너뜀")
     p.add_argument("root", help="공유폴더 경로 (그 바로 아래 폴더들이 처리 단위)")
     p.add_argument("--skip", nargs="*", help="제외할 폴더명 (예: --skip 2023 소송)")
@@ -956,6 +1042,10 @@ def main():
     if args.cmd == "cleanup-apply":
         if not os.path.isfile(args.plan):
             sys.exit(f"[오류] 계획서 없음: {args.plan}")
+    elif args.cmd == "compare":
+        for x in (args.src, args.dst):
+            if not os.path.isdir(x):
+                sys.exit(f"[오류] 폴더가 없거나 접근 불가: {x}")
     elif not os.path.isdir(args.root):
         sys.exit(f"[오류] 폴더가 없거나 접근 불가: {args.root}")
     if not HAS_OPENPYXL:
@@ -972,7 +1062,7 @@ def main():
 def _run(args, cfg):
     {"init": cmd_init, "lint": cmd_lint, "report": cmd_report, "dupes": cmd_dupes,
      "cleanup": cmd_cleanup, "cleanup-apply": cmd_cleanup_apply,
-     "cleanup-all": cmd_cleanup_all}[args.cmd](args, cfg)
+     "cleanup-all": cmd_cleanup_all, "compare": cmd_compare}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":
