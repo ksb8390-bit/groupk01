@@ -61,7 +61,7 @@ Group=$APP_USER
 WorkingDirectory=$APP_DIR
 Environment=HR_DATABASE=$DATA_DIR/hr.sqlite3
 Environment=HR_SECURE_COOKIE=1
-ExecStart=$APP_DIR/.venv/bin/gunicorn -w 2 -b 127.0.0.1:8000 --access-logfile - "hr.app:create_app()"
+ExecStart=$APP_DIR/.venv/bin/gunicorn -w 3 --threads 8 --preload -b 127.0.0.1:8000 --timeout 60 --access-logfile - "hr.app:create_app()"
 Restart=always
 RestartSec=3
 NoNewPrivileges=true

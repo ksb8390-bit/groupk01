@@ -38,7 +38,8 @@ echo
 
 # macOS에서 gunicorn 작업 프로세스가 비정상 종료되는 것을 막는 설정
 export OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
-CMD=(gunicorn -w 3 --threads 8 -b "0.0.0.0:$PORT" --timeout 60 --access-logfile - "hr.app:create_app()")
+# --preload: DB 준비(테이블·컬럼 추가)를 워커들이 뜨기 전에 한 번만 실행
+CMD=(gunicorn -w 3 --threads 8 --preload -b "0.0.0.0:$PORT" --timeout 60 --access-logfile - "hr.app:create_app()")
 if command -v caffeinate >/dev/null 2>&1; then
   exec caffeinate -i "${CMD[@]}"
 else

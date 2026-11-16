@@ -177,7 +177,7 @@ DEFAULT_SETTINGS = {
 
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
-        conn = sqlite3.connect(current_app.config["DATABASE"])
+        conn = sqlite3.connect(current_app.config["DATABASE"], timeout=30)   # 동시 쓰기 시 잠금 대기
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         g.db = conn
@@ -200,16 +200,21 @@ MIGRATIONS = [   # (테이블, 컬럼, 정의) — 기존 DB에 없는 컬럼 �
 
 
 def init_db():
+    """테이블 생성·컬럼 추가. 여러 서버 프로세스(gunicorn 워커)가 동시에 실행해도 안전하게 작성."""
     db = get_db()
     db.executescript(SCHEMA)
     for table, col, ddl in MIGRATIONS:
         if col not in {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}:
-            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            try:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError as e:      # 다른 프로세스가 먼저 추가한 경우
+                if "duplicate column" not in str(e).lower():
+                    raise
     for k, v in DEFAULT_SETTINGS.items():
         db.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
-    if not db.execute("SELECT 1 FROM chat_rooms WHERE kind='all'").fetchone():
-        db.execute("INSERT INTO chat_rooms(name, kind, description) VALUES "
-                   "('전체대화방', 'all', '전 직원이 자동으로 참여하는 대화방')")
+    db.execute("INSERT INTO chat_rooms(name, kind, description) "      # 확인과 추가를 한 문장으로(중복 생성 방지)
+               "SELECT '전체대화방', 'all', '전 직원이 자동으로 참여하는 대화방' "
+               "WHERE NOT EXISTS (SELECT 1 FROM chat_rooms WHERE kind='all')")
     db.commit()
 
 
