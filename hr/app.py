@@ -639,7 +639,8 @@ def _register_routes(app: Flask):
                 flash(f"배정 근무지({mine})에서 확인되지 않았습니다. 메모 칸에 사유(예: ○○현장 지원, GPS 오류)를 적고 다시 "
                       "출근하기를 누르면 '위치 미확인'으로 기록됩니다.")
                 return redirect(url_for("home", need_reason=1))
-        in_verified = (1 if verified else 0) if needs_check else None
+        # '기록만' 정책에서는 확인 실패를 경고(0)로 남기지 않음 → 근무지 등록 전 불필요한 ⚠ 방지
+        in_verified = (1 if verified else (0 if policy != "record" else None)) if needs_check else None
 
         n = now()
         t = n.date().isoformat()
@@ -673,7 +674,8 @@ def _register_routes(app: Flask):
                 if n - parse_dt(rec["check_in"]) > timedelta(hours=OVERNIGHT_MAX_HOURS):
                     flash(f"전날({rec['work_date']}) 퇴근 기록이 누락되었습니다. 근태정정을 신청하세요.")
                     return redirect(url_for("home"))
-            out_ver = (1 if verified else 0) if rec["work_type"] in ("office", "field") else None
+            out_ver = ((1 if verified else (0 if policy != "record" else None))
+                       if rec["work_type"] in ("office", "field") else None)
             db.execute("UPDATE attendance SET check_out=?, out_lat=?, out_lon=?, out_place=?, out_ip=?, out_verified=? "
                        "WHERE id=?", (stamp, lat, lon, place, ip, out_ver, rec["id"]))
             from .chat import set_status
@@ -735,7 +737,7 @@ def _register_routes(app: Flask):
             except (KeyError, ValueError):
                 flash("날짜를 확인하세요.")
                 return redirect(url_for("my_requests"))
-            if kind not in KIND_LABELS or ed < sd:
+            if kind not in KIND_LABELS:
                 flash("신청 내용을 확인하세요.")
                 return redirect(url_for("my_requests"))
             if kind == "holiday_work":
@@ -744,8 +746,12 @@ def _register_routes(app: Flask):
                 unit = "full" if kind in LEAVE_KINDS else "hours"
             elif unit == "hours" and kind not in HOUR_UNIT_KINDS:
                 unit = "full"
-            if unit != "full":
+            # 하루짜리 신청(반차·시간·휴일근무·연장·정정)은 화면에 숨겨진 종료일 값을 쓰지 않음
+            if unit != "full" or kind in ("holiday_work", "overtime", "correction"):
                 ed = sd
+            if ed < sd:
+                flash("종료일이 시작일보다 빠릅니다. 날짜를 확인하세요.")
+                return redirect(url_for("my_requests"))
             days = rules.leave_days(sd, ed, unit, holiday_set(sd, ed)) if kind in LEAVE_KINDS else 0
             minutes = 0
             corr_in = corr_out = None

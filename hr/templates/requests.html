@@ -78,5 +78,7 @@ function sync(){
   show('[data-for=range]', (isLeave && unit.value === 'full') || k === 'field');
 }
 kind.onchange = unit.onchange = sync; sync();
+const sdI = document.querySelector('[name=start_date]'), edI = document.querySelector('[name=end_date]');
+sdI.addEventListener('change', () => { if (!edI.value || edI.value < sdI.value) edI.value = sdI.value; });
 </script>
 {% endblock %}

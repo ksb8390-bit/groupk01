@@ -339,3 +339,26 @@ def test_admin_assigns_workplace_members(app):
         assert {r[0] for r in db.execute("SELECT user_id FROM user_workplaces")} == {2, 3}
     assert "배정 2명" in a.get("/admin/settings").get_data(as_text=True)
     assert "🏢" in login(app.test_client(), "kim") or True
+
+
+
+def test_future_half_day_and_hourly_with_stale_hidden_end_date(app):
+    """화면에는 숨겨진 종료일(오늘 날짜)이 함께 전송됨 — 미래 날짜 반차·시간 연차도 접수되어야 함."""
+    c = app.test_client(); tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "am", "start_date": "2026-11-18",
+                              "end_date": "2026-11-10"})
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "hours", "start_date": "2026-11-19",
+                              "end_date": "2026-11-10", "leave_start": "16:00", "leave_hours": "2"})
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "full", "start_date": "2026-11-20",
+                              "end_date": "2026-11-10"})                                       # 종일은 거부
+    with app.app_context():
+        rows = get_db().execute("SELECT unit, start_date, end_date FROM requests ORDER BY id").fetchall()
+    assert [tuple(r) for r in rows] == [("am", "2026-11-18", "2026-11-18"), ("hours", "2026-11-19", "2026-11-19")]
+
+
+def test_record_policy_does_not_flag_unverified(app):
+    c = app.test_client(); tok = login(c, "kim")
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    with app.app_context():
+        assert get_db().execute("SELECT in_verified FROM attendance").fetchone()["in_verified"] is None
+    assert "위치 미확인" not in c.get("/").get_data(as_text=True)
