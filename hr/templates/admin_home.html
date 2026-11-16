@@ -20,7 +20,7 @@
       <td><span class="st s-{{ b.status }}">{{ b.status }}</span></td>
       <td>{{ b.rec.check_in|time if b.rec else '' }}{% if late_on and b.rec and b.rec.late_min %} <em class="late">+{{ b.rec.late_min }}</em>{% endif %}</td>
       <td>{{ b.rec.check_out|time if b.rec else '' }}</td>
-      <td class="small">{% if b.rec %}{{ WORK_TYPES[b.rec.work_type] }} {{ b.rec.in_place or '' }} {{ b.rec.note or '' }}{% endif %}</td>
+      <td class="small">{% if b.rec %}{{ WORK_TYPES[b.rec.work_type] }} {{ b.rec.in_place or '' }}{% if b.rec.in_verified == 0 %} <span class="st rejected" title="배정 근무지에서 확인되지 않음">⚠ 위치 미확인</span>{% endif %} {{ b.rec.note or '' }}{% endif %}</td>
       <td class="{{ 'warn' if b.week > 48*60 }}">{{ hm(b.week) }}{% if b.week > limit %} ⚠{% endif %}</td>
     </tr>
     {% endfor %}

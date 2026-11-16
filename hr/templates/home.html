@@ -31,15 +31,17 @@
       <label><input type="radio" name="work_type" value="{{ k }}" {{ 'checked' if k=='office' }}><span>{{ v }}</span></label>
       {% endfor %}
     </div>
-    <input name="note" placeholder="메모 (현장명 등, 선택)">
+    <input name="note" placeholder="{{ '근무지 밖 출근 사유 (예: ○○현장 지원, GPS 오류)' if need_reason else '메모 (현장명 등, 선택)' }}" {{ 'autofocus style=border-color:var(--warn)' if need_reason }}>
     <button type="button" class="btn primary big" data-action="in">출근하기</button>
     {% else %}
     <button type="button" class="btn dark big" data-action="out">{{ '퇴근 시각 갱신' if rec.check_out else '퇴근하기' }}</button>
     {% endif %}
   </form>
+  <p class="small">내 근무지: {% for w in my_wps %}<b>{{ '🏢' if w.kind=='hq' else '🏗️' }} {{ w.name }}</b>{{ ', ' if not loop.last }}{% else %}<span class="muted">배정 없음(등록된 모든 근무지 인정)</span>{% endfor %}</p>
+  {% if rec and rec.in_verified == 0 %}<div class="notice">출근 위치가 배정 근무지에서 확인되지 않아 '위치 미확인'으로 기록되었습니다.</div>{% endif %}
   <p class="muted small" id="geoMsg">
     {% if consent %}위치 확인 후 기록됩니다.{% else %}위치 수집에 동의하지 않아 시각·IP만 기록됩니다.{% endif %}
-    {% if require_location %} (사무실 출근은 근무지 반경 내에서만 가능){% endif %}
+    {% if policy == 'block' %} 사무실·현장 출근은 배정 근무지에서 확인되어야 합니다.{% elif policy == 'flag' %} 배정 근무지 밖이면 사유를 적어야 출근됩니다.{% endif %}
   </p>
 </section>
 

@@ -37,7 +37,14 @@ CREATE TABLE IF NOT EXISTS workplaces (
     name TEXT NOT NULL,
     lat REAL NOT NULL,
     lon REAL NOT NULL,
-    radius_m INTEGER NOT NULL DEFAULT 200
+    radius_m INTEGER NOT NULL DEFAULT 200,
+    kind TEXT NOT NULL DEFAULT 'site'        -- hq(본사) / site(현장)
+);
+
+CREATE TABLE IF NOT EXISTS user_workplaces (   -- 직원별 배정 근무지 (여러 곳 가능)
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    workplace_id INTEGER NOT NULL REFERENCES workplaces(id),
+    PRIMARY KEY (user_id, workplace_id)
 );
 
 CREATE TABLE IF NOT EXISTS attendance (
@@ -160,7 +167,9 @@ DEFAULT_SETTINGS = {
     "late_check": "0",         # 지각 판정 (0=끔: 선택근무제 등 출근시각 자율 / 1=켬)
     "late_grace_min": "10",    # 지각 판정 시 출근시각 + 10분까지는 지각 아님
     "comp_ratio": "1",         # 휴일근무 1일당 대체휴가 적립 배율 (1 또는 1.5)
-    "require_location": "0",   # 1이면 사내망 또는 근무지 반경 확인 없이는 '사무실' 출근 불가
+    "require_location": "0",   # (구버전 호환) 1이면 location_policy=block 과 같음
+    "location_policy": "record",  # 근무지 밖 출근: record(기록만) / flag(사유 입력 후 '위치 미확인') / block(차단)
+                                  # 근무지·배정·사무실 Wi‑Fi 등록을 마친 뒤 관리자가 flag 로 전환
     "office_networks": "",     # 사무실 인터넷 공인 IP(또는 대역) — Wi‑Fi 출근 인증 대용
     "office_network_name": "사무실 Wi‑Fi",
 }
@@ -184,6 +193,9 @@ def close_db(_exc=None):
 MIGRATIONS = [   # (테이블, 컬럼, 정의) — 기존 DB에 없는 컬럼 추가
     ("requests", "start_time", "TEXT"),
     ("requests", "end_time", "TEXT"),
+    ("workplaces", "kind", "TEXT NOT NULL DEFAULT 'site'"),
+    ("attendance", "in_verified", "INTEGER"),      # 1=배정 근무지 확인, 0=미확인, NULL=확인 대상 아님(재택·출장)
+    ("attendance", "out_verified", "INTEGER"),
 ]
 
 

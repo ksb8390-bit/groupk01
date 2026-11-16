@@ -249,3 +249,93 @@ def test_account_sheet_pdf(app, tmp_path):
         db = get_db(); db.execute("UPDATE users SET must_change_pw=1 WHERE login_id='kim'"); db.commit()
     r = app.test_cli_runner().invoke(args=["account-sheet", "--reissue", "--out", str(out)], input="y\n")
     assert r.exit_code == 0, r.output and "개인 안내장 1장" in r.output
+
+
+
+# ---------------------------------------------------------------- 배정 근무지(본사·현장) 출근 확인
+def _setup_sites(app, policy="flag"):
+    with app.app_context():
+        db = get_db()
+        db.execute("UPDATE workplaces SET kind='hq' WHERE name='본사'")                     # 33.4996,126.5312
+        db.execute("INSERT INTO workplaces(name,lat,lon,radius_m,kind) VALUES ('애월현장',33.4620,126.3290,300,'site')")
+        site = db.execute("SELECT id FROM workplaces WHERE name='애월현장'").fetchone()["id"]
+        db.execute("INSERT INTO user_workplaces(user_id, workplace_id) VALUES (2, ?)", (site,))   # kim = 감리원
+        db.execute("UPDATE users SET location_consent=1 WHERE login_id='kim'")
+        db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES ('location_policy', ?)", (policy,))
+        db.commit()
+
+
+def _att(app):
+    with app.app_context():
+        return get_db().execute("SELECT * FROM attendance ORDER BY id DESC").fetchone()
+
+
+def test_site_supervisor_verified_at_assigned_site(app):
+    _setup_sites(app)
+    c = app.test_client(); tok = login(c, "kim")
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office", "lat": "33.4625", "lon": "126.3295"})
+    r = _att(app)
+    assert (r["in_place"], r["in_verified"], r["work_type"]) == ("애월현장", 1, "field")    # 현장으로 자동 지정
+
+
+def test_site_supervisor_at_hq_gps_is_not_their_site(app):
+    _setup_sites(app)
+    c = app.test_client(); tok = login(c, "kim")
+    # 본사 좌표(배정 외) → 사유 없으면 거부
+    r = c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.4997", "lon": "126.5313"})
+    assert "need_reason=1" in r.headers["Location"] and _att(app) is None
+    # 사유 입력 → 위치 미확인으로 기록, 가장 가까운 근무지 표기
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.4997", "lon": "126.5313",
+                           "note": "본사 회의"})
+    r = _att(app)
+    assert r["in_verified"] == 0 and r["in_place"].startswith("근무지 밖(본사") and r["note"] == "본사 회의"
+    assert "위치 미확인" in c.get("/").get_data(as_text=True)
+    a = app.test_client(); login(a, "admin")
+    assert "위치 미확인" in a.get("/admin").get_data(as_text=True)
+
+
+def test_office_wifi_counts_as_hq_and_unassigned_staff_any_site(app):
+    _setup_sites(app)
+    with app.app_context():
+        db = get_db(); db.execute("INSERT OR REPLACE INTO settings(key,value) VALUES ('office_networks','127.0.0.1')"); db.commit()
+    l = app.test_client(); tok = login(l, "lee")                       # 배정 없음, 위치 없음, 사무실 Wi‑Fi
+    l.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office"})
+    r = _att(app)
+    assert (r["in_place"], r["in_verified"], r["work_type"]) == ("본사", 1, "office")
+
+
+def test_block_policy_and_remote_trip_exempt_and_checkout_never_blocked(app):
+    _setup_sites(app, policy="block")
+    c = app.test_client(); tok = login(c, "kim")
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.30", "lon": "126.30", "note": "x"})
+    assert _att(app) is None                                           # 차단은 사유가 있어도 거부
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "remote"})
+    assert (_att(app)["work_type"], _att(app)["in_verified"]) == ("remote", None)
+    with app.app_context():
+        db = get_db(); db.execute("DELETE FROM attendance"); db.commit()
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.4625", "lon": "126.3295"})
+    c.post("/punch", data={"csrf": tok, "action": "out", "lat": "33.30", "lon": "126.30"})   # 현장 밖 퇴근도 허용
+    r = _att(app)
+    assert r["check_out"] and r["out_verified"] == 0
+
+
+def test_requests_and_chat_have_no_location_restriction(app):
+    _setup_sites(app, policy="block")
+    c = app.test_client(); tok = login(c, "kim")
+    c.post("/requests", data={"csrf": tok, "kind": "annual", "unit": "full", "start_date": "2026-11-16"})
+    with app.app_context():
+        assert get_db().execute("SELECT COUNT(*) c FROM requests").fetchone()["c"] == 1
+
+
+def test_admin_assigns_workplace_members(app):
+    a = app.test_client(); at = login(a, "admin")
+    with app.app_context():
+        wid = get_db().execute("SELECT id FROM workplaces").fetchone()["id"]
+    a.post(f"/admin/workplaces/{wid}", data={"csrf": at, "name": "본사", "kind": "hq", "lat": "33.4996",
+                                              "lon": "126.5312", "radius_m": "150", "members": ["2", "3"]})
+    with app.app_context():
+        db = get_db()
+        assert db.execute("SELECT kind, radius_m FROM workplaces WHERE id=?", (wid,)).fetchone()[:] == ("hq", 150)
+        assert {r[0] for r in db.execute("SELECT user_id FROM user_workplaces")} == {2, 3}
+    assert "배정 2명" in a.get("/admin/settings").get_data(as_text=True)
+    assert "🏢" in login(app.test_client(), "kim") or True

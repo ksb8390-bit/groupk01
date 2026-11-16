@@ -67,10 +67,13 @@ def test_require_location_blocks_office_outside(app):
     tok = login(c, "kim")
     c.post("/consent", data={"csrf": tok, "agree": "1"})
     c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "office", "lat": "33.30", "lon": "126.30"})
-    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.30", "lon": "126.30"})
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "field", "lat": "33.30", "lon": "126.30"})  # 현장도 확인 대상
     with app.app_context():
-        rows = get_db().execute("SELECT work_type FROM attendance").fetchall()
-        assert [r["work_type"] for r in rows] == ["field"]
+        assert get_db().execute("SELECT COUNT(*) c FROM attendance").fetchone()["c"] == 0
+    c.post("/punch", data={"csrf": tok, "action": "in", "work_type": "trip", "lat": "33.30", "lon": "126.30"})   # 출장은 제외
+    with app.app_context():
+        rows = get_db().execute("SELECT work_type, in_verified FROM attendance").fetchall()
+        assert [(r["work_type"], r["in_verified"]) for r in rows] == [("trip", None)]
 
 
 def test_leave_request_approval_and_balance(app):

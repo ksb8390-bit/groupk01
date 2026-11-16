@@ -14,7 +14,11 @@
       <option value="1" {{ 'selected' if s.comp_ratio in ('1','1.0') }}>1.0일 — 휴일대체(1:1)</option>
       <option value="1.5" {{ 'selected' if s.comp_ratio == '1.5' }}>1.5일 — 보상휴가(가산 50% 포함)</option>
     </select></label>
-    <label class="check"><input type="checkbox" name="require_location" {{ 'checked' if s.require_location=='1' }}> '사무실' 출근은 근무지 반경 내에서만 허용</label>
+    <label>배정 근무지 밖에서 출근할 때 (재택·출장은 제외)<select name="location_policy">
+      <option value="record" {{ 'selected' if policy=='record' }}>기록만 (제한 없음)</option>
+      <option value="flag" {{ 'selected' if policy=='flag' }}>사유 입력 후 '위치 미확인' 표시 (근무지 등록 후 권장)</option>
+      <option value="block" {{ 'selected' if policy=='block' }}>출근 차단</option>
+    </select></label>
     <div><button class="btn primary">저장</button></div>
   </form>
 </section>
@@ -32,11 +36,14 @@
   </form>
 </section>
 <section class="card">
-  <h2>근무지 (위치 확인 기준)</h2>
-  <ul class="list">{% for w in workplaces %}<li>{{ w.name }} <small class="muted">{{ w.lat }}, {{ w.lon }} · 반경 {{ w.radius_m }}m</small>
+  <h2>근무지 (본사·현장)</h2>
+  <p class="small muted">근무지마다 직원을 배정하면, 출근 시 그 근무지 반경 안(GPS) 또는 사무실 Wi‑Fi에서만 '위치 확인'으로 기록됩니다. 배정이 없는 직원은 등록된 모든 근무지를 인정합니다. 감리원은 담당 현장에 배정하세요.</p>
+  <ul class="list">{% for w in workplaces %}<li><span>{{ '🏢 본사' if w.kind=='hq' else '🏗️ 현장' }} <b>{{ w.name }}</b> <small class="muted">반경 {{ w.radius_m }}m · 배정 {{ counts.get(w.id, 0) }}명</small>
+    <a class="small" href="{{ url_for('admin_workplace', wid=w.id) }}">직원 배정·수정</a></span>
     <form method="post" class="inline"><input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_del"><input type="hidden" name="id" value="{{ w.id }}"><button class="link">삭제</button></form></li>{% endfor %}</ul>
   <form method="post" class="row">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_add">
+    <select name="kind" style="width:auto"><option value="site">현장</option><option value="hq">본사</option></select>
     <input name="name" placeholder="근무지명 (본사, ○○현장)" required>
     <input name="lat" placeholder="위도 33.xxx" required><input name="lon" placeholder="경도 126.xxx" required>
     <input name="radius_m" type="number" value="200" style="width:6em"> m

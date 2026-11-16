@@ -23,7 +23,7 @@
         <td>{{ x.rec.check_in|time if x.rec else '' }}{% if late_on and x.rec and x.rec.late_min %} <em class="late">+{{ x.rec.late_min }}</em>{% endif %}</td>
         <td>{{ x.rec.check_out|time if x.rec else '' }}</td>
         <td>{{ hm(x.minutes) if x.minutes else '' }}</td>
-        <td class="small">{{ x.holiday or '' }} {{ x.labels|join(', ') }}{% if x.rec and x.rec.work_type!='office' %} {{ WORK_TYPES[x.rec.work_type] }}{% endif %}{% if x.rec and x.rec.note %} <span class="muted">{{ x.rec.note }}</span>{% endif %}</td>
+        <td class="small">{{ x.holiday or '' }} {{ x.labels|join(', ') }}{% if x.rec and x.rec.work_type!='office' %} {{ WORK_TYPES[x.rec.work_type] }}{% endif %}{% if x.rec and x.rec.in_place %} <span class="muted">{{ x.rec.in_place }}</span>{% endif %}{% if x.rec and x.rec.in_verified == 0 %} <span class="st rejected">⚠ 위치 미확인</span>{% endif %}{% if x.rec and x.rec.note %} <span class="muted">{{ x.rec.note }}</span>{% endif %}</td>
         {% if admin and me.role=='admin' %}
         <td>
           <details><summary>✎</summary>

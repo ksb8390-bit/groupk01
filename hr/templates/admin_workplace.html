@@ -1,0 +1,29 @@
+{% extends 'base.html' %}
+{% block body %}
+<section class="card">
+  <h1>{{ '🏢' if wp.kind=='hq' else '🏗️' }} {{ wp.name }} — 근무지 수정·직원 배정</h1>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+    <div class="formgrid">
+      <label>근무지명<input name="name" value="{{ wp.name }}" required></label>
+      <label>종류<select name="kind"><option value="hq" {{ 'selected' if wp.kind=='hq' }}>본사</option><option value="site" {{ 'selected' if wp.kind!='hq' }}>현장</option></select></label>
+      <label>위도<input name="lat" value="{{ wp.lat }}" required></label>
+      <label>경도<input name="lon" value="{{ wp.lon }}" required></label>
+      <label>반경(m)<input type="number" name="radius_m" value="{{ wp.radius_m }}" min="10" max="5000"></label>
+      <div><button type="button" class="btn small" id="here">지금 이 위치로 좌표 바꾸기</button></div>
+    </div>
+    <h2>배정 직원 <small class="muted">이 근무지에서 출근하는 직원 (여러 근무지 배정 가능)</small></h2>
+    <div class="chip-row">{% for u in users %}<label><input type="checkbox" name="members" value="{{ u.id }}" {{ 'checked' if u.id in members }}><span>{{ u.name }} {{ u.position or '' }}{% if u.dept %} · {{ u.dept }}{% endif %}</span></label>{% endfor %}</div>
+    <div class="row" style="margin-top:10px"><button class="btn primary">저장</button> <a href="{{ url_for('admin_settings') }}">취소</a></div>
+  </form>
+  <p class="small muted">반경은 현장 규모에 맞게 정하세요(일반 건물 100~200m, 대형 현장 300~500m). 휴대폰 GPS는 건물 안에서 수십 m 오차가 날 수 있습니다.</p>
+</section>
+{% endblock %}
+{% block script %}
+<script>
+document.getElementById('here').onclick = () => navigator.geolocation ? navigator.geolocation.getCurrentPosition(p => {
+  document.querySelector('[name=lat]').value = p.coords.latitude.toFixed(6);
+  document.querySelector('[name=lon]').value = p.coords.longitude.toFixed(6);
+}, e => alert('위치를 가져오지 못했습니다(HTTPS 접속 필요): ' + e.message)) : alert('위치 기능을 쓸 수 없습니다.');
+</script>
+{% endblock %}

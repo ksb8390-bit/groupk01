@@ -252,6 +252,39 @@ def in_office_network(ip: str) -> bool:
     return any(addr in n for n in office_networks())
 
 
+def my_workplaces(user_id: int):
+    return get_db().execute("SELECT w.* FROM workplaces w JOIN user_workplaces uw ON uw.workplace_id=w.id "
+                            "WHERE uw.user_id=? ORDER BY w.kind, w.name", (user_id,)).fetchall()
+
+
+def location_policy() -> str:
+    if setting("require_location") == "1":
+        return "block"
+    p = setting("location_policy")
+    return p if p in ("record", "flag", "block") else "record"
+
+
+def verify_location(user, lat, lon, ip) -> tuple:
+    """(장소명, 배정 근무지 확인 여부, 종류 hq/site).
+    배정 근무지가 있으면 그곳만, 없으면 등록된 모든 근무지를 기준으로 GPS 반경 확인. 사무실 Wi‑Fi는 본사로 인정."""
+    db = get_db()
+    allowed = my_workplaces(user["id"]) or db.execute("SELECT * FROM workplaces").fetchall()
+    if lat is not None and lon is not None:
+        for wp in sorted(allowed, key=lambda w: rules.haversine_m(lat, lon, w["lat"], w["lon"])):
+            if rules.haversine_m(lat, lon, wp["lat"], wp["lon"]) <= wp["radius_m"]:
+                return wp["name"], True, wp["kind"]
+    if in_office_network(ip):
+        hq = next((w for w in db.execute("SELECT * FROM workplaces WHERE kind='hq'").fetchall()), None)
+        return (hq["name"] if hq else (setting("office_network_name") or "사무실 Wi‑Fi")), True, "hq"
+    if lat is not None and lon is not None:     # 위치는 왔지만 배정 근무지 밖 → 가장 가까운 등록 근무지 참고 표기
+        near = min(db.execute("SELECT * FROM workplaces").fetchall() or [None],
+                   key=lambda w: rules.haversine_m(lat, lon, w["lat"], w["lon"]) if w else 0)
+        if near:
+            d = rules.haversine_m(lat, lon, near["lat"], near["lon"])
+            return f"근무지 밖({near['name']}에서 {d / 1000:.1f}km)", False, None
+    return None, False, None
+
+
 def valid_hm(v):
     """'HH:MM' 형식만 통과, 아니면 None."""
     try:
@@ -561,7 +594,8 @@ def _register_routes(app: Flask):
         wk = week_minutes(me["id"], t)
         ws, we = schedule_of(me)
         return render_template(
-            "home.html", rec=rec, open_prev=open_prev, overnight_max=OVERNIGHT_MAX_HOURS, on_leave=on_leave, notices=notices, week_min=wk,
+            "home.html", rec=rec, open_prev=open_prev, my_wps=my_workplaces(me["id"]), policy=location_policy(),
+            need_reason=request.args.get("need_reason") == "1", overnight_max=OVERNIGHT_MAX_HOURS, on_leave=on_leave, notices=notices, week_min=wk,
             week_limit=rules.WEEKLY_LIMIT_MIN, bal=leave_balance(me), comp=comp_balance(me), sched=(ws, we),
             today=t, consent=me["location_consent"],
             require_location=setting("require_location") == "1")
@@ -588,18 +622,24 @@ def _register_routes(app: Flask):
             work_type = "office"
         lat = request.form.get("lat", type=float) if me["location_consent"] else None
         lon = request.form.get("lon", type=float) if me["location_consent"] else None
-        place = None
-        if lat is not None and lon is not None:
-            for wp in db.execute("SELECT * FROM workplaces").fetchall():
-                if rules.haversine_m(lat, lon, wp["lat"], wp["lon"]) <= wp["radius_m"]:
-                    place = wp["name"]
-                    break
         ip = client_ip()
-        if place is None and in_office_network(ip):
-            place = setting("office_network_name") or "사내망"
-        if (setting("require_location") == "1" and work_type == "office" and place is None):
-            flash("사무실 Wi‑Fi에 연결되어 있지 않고 등록된 근무지 반경 밖입니다. 사무실 Wi‑Fi에 연결하거나 현장/재택/출장을 선택하세요.")
-            return redirect(url_for("home"))
+        note = (request.form.get("note") or "").strip() or None
+        place, verified, kind = verify_location(me, lat, lon, ip)
+        needs_check = work_type in ("office", "field")      # 재택·출장은 위치 확인 대상 아님
+        if needs_check and verified:
+            work_type = "field" if kind == "site" else "office"   # 확인된 근무지 종류로 자동 지정
+        policy = location_policy()
+        if action == "in" and needs_check and not verified and policy != "record":
+            mine = ", ".join(w["name"] for w in my_workplaces(me["id"])) or "등록된 근무지"
+            if policy == "block":
+                flash(f"배정 근무지({mine})에서 확인되지 않아 출근할 수 없습니다. 근무지 반경 안에서 위치 권한을 허용하거나 "
+                      "사무실 Wi‑Fi에 연결하세요. 재택·출장이면 해당 유형을 선택하세요.")
+                return redirect(url_for("home"))
+            if not note:
+                flash(f"배정 근무지({mine})에서 확인되지 않았습니다. 메모 칸에 사유(예: ○○현장 지원, GPS 오류)를 적고 다시 "
+                      "출근하기를 누르면 '위치 미확인'으로 기록됩니다.")
+                return redirect(url_for("home", need_reason=1))
+        in_verified = (1 if verified else 0) if needs_check else None
 
         n = now()
         t = n.date().isoformat()
@@ -613,17 +653,17 @@ def _register_routes(app: Flask):
             late = compute_late(me, n)
             db.execute(
                 "INSERT INTO attendance(user_id,work_date,check_in,in_lat,in_lon,in_place,in_ip,"
-                "work_type,late_min,note) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                "work_type,late_min,note,in_verified) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(user_id,work_date) DO UPDATE SET check_in=excluded.check_in, "
                 "in_lat=excluded.in_lat, in_lon=excluded.in_lon, in_place=excluded.in_place, "
                 "in_ip=excluded.in_ip, work_type=excluded.work_type, late_min=excluded.late_min, "
-                "note=COALESCE(excluded.note, attendance.note) WHERE attendance.check_in IS NULL",
-                (me["id"], t, stamp, lat, lon, place, ip, work_type, late,
-                 request.form.get("note") or None))
+                "note=COALESCE(excluded.note, attendance.note), in_verified=excluded.in_verified "
+                "WHERE attendance.check_in IS NULL",
+                (me["id"], t, stamp, lat, lon, place, ip, work_type, late, note, in_verified))
             from .chat import WORK_TYPE_TO_STATUS, set_status
-            set_status(me["id"], WORK_TYPE_TO_STATUS.get(work_type, "office"),
-                       place or (request.form.get("note") or None))
-            flash(f"출근 {n:%H:%M}" + (f" (지각 {late}분)" if late else ""))
+            set_status(me["id"], WORK_TYPE_TO_STATUS.get(work_type, "office"), place or note)
+            flash(f"출근 {n:%H:%M}" + (f" · {place}" if place else "") +
+                  (" · 위치 미확인" if in_verified == 0 else "") + (f" (지각 {late}분)" if late else ""))
         elif action == "out":
             if not rec or not rec["check_in"]:
                 rec = open_previous_record(me["id"])   # 전날 출근 → 자정 넘어 퇴근
@@ -633,8 +673,9 @@ def _register_routes(app: Flask):
                 if n - parse_dt(rec["check_in"]) > timedelta(hours=OVERNIGHT_MAX_HOURS):
                     flash(f"전날({rec['work_date']}) 퇴근 기록이 누락되었습니다. 근태정정을 신청하세요.")
                     return redirect(url_for("home"))
-            db.execute("UPDATE attendance SET check_out=?, out_lat=?, out_lon=?, out_place=?, out_ip=? "
-                       "WHERE id=?", (stamp, lat, lon, place, ip, rec["id"]))
+            out_ver = (1 if verified else 0) if rec["work_type"] in ("office", "field") else None
+            db.execute("UPDATE attendance SET check_out=?, out_lat=?, out_lon=?, out_place=?, out_ip=?, out_verified=? "
+                       "WHERE id=?", (stamp, lat, lon, place, ip, out_ver, rec["id"]))
             from .chat import set_status
             set_status(me["id"], "off")
             flash(f"퇴근 {n:%H:%M}" + (" (퇴근 시각 갱신)" if rec["check_out"] else ""))
@@ -977,7 +1018,7 @@ def _register_routes(app: Flask):
         ws.append(head)
         detail = wb.create_sheet("일별상세")
         detail.append(["일자", "요일", "부서", "이름", "근무유형", "출근", "퇴근", "근로시간"] +
-                      (["지각(분)"] if late_on else []) + ["휴가·신청", "출근위치", "비고"])
+                      (["지각(분)"] if late_on else []) + ["휴가·신청", "출근위치", "위치확인", "비고"])
         wd = "월화수목금토일"
         for u in users:
             md = _month_data(u, first, last)
@@ -994,7 +1035,9 @@ def _register_routes(app: Flask):
                     WORK_TYPES.get(rec["work_type"], "") if rec else "",
                     (rec["check_in"] or "")[11:16] if rec else "", (rec["check_out"] or "")[11:16] if rec else "",
                     rules.fmt_hm(x["minutes"]) if rec else ""] + ([rec["late_min"] if rec else ""] if late_on else []) +
-                    [", ".join(x["labels"]), (rec["in_place"] or "") if rec else "", (rec["note"] or "") if rec else ""])
+                    [", ".join(x["labels"]), (rec["in_place"] or "") if rec else "",
+                     ({1: "확인", 0: "미확인"}.get(rec["in_verified"], "") if rec else ""),
+                     (rec["note"] or "") if rec else ""])
         for sh in (ws, detail):
             for c in sh[1]:
                 c.font = Font(bold=True, color="FFFFFF")
@@ -1145,16 +1188,17 @@ def _register_routes(app: Flask):
                         db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, ?)", (k, v))
                 db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('late_check', ?)",
                            ("1" if f.get("late_check") else "0",))
-                db.execute("UPDATE settings SET value=? WHERE key='require_location'",
-                           ("1" if request.form.get("require_location") else "0",))
+                pol = f.get("location_policy") if f.get("location_policy") in ("record", "flag", "block") else "record"
+                db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('location_policy', ?)", (pol,))
+                db.execute("UPDATE settings SET value=? WHERE key='require_location'", ("1" if pol == "block" else "0",))
             elif sec == "workplace_add":
                 try:
                     lat, lon = float(f["lat"]), float(f["lon"])
                     radius = int(f.get("radius_m") or 200)
                     if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 10 <= radius <= 5000 and f["name"].strip()):
                         raise ValueError
-                    db.execute("INSERT INTO workplaces(name,lat,lon,radius_m) VALUES (?,?,?,?)",
-                               (f["name"].strip(), lat, lon, radius))
+                    db.execute("INSERT INTO workplaces(name,lat,lon,radius_m,kind) VALUES (?,?,?,?,?)",
+                               (f["name"].strip(), lat, lon, radius, "hq" if f.get("kind") == "hq" else "site"))
                 except (KeyError, ValueError):
                     err = "근무지명, 위도(예: 33.4996), 경도(예: 126.5312), 반경(10~5000m)을 확인하세요."
             elif sec == "office_network":
@@ -1175,6 +1219,7 @@ def _register_routes(app: Flask):
                 except ValueError:
                     err = "IP 주소 형식을 확인하세요. 예: 211.234.10.25 또는 192.168.1.0/24"
             elif sec == "workplace_del":
+                db.execute("DELETE FROM user_workplaces WHERE workplace_id=?", (request.form.get("id", type=int),))
                 db.execute("DELETE FROM workplaces WHERE id=?", (request.form.get("id", type=int),))
             elif sec == "holiday_add":
                 try:
@@ -1193,10 +1238,46 @@ def _register_routes(app: Flask):
             flash("저장했습니다.")
             return redirect(url_for("admin_settings"))
         sets = {r["key"]: r["value"] for r in db.execute("SELECT * FROM settings").fetchall()}
+        counts = {r["workplace_id"]: r["c"] for r in db.execute(
+            "SELECT workplace_id, COUNT(*) c FROM user_workplaces uw JOIN users u ON u.id=uw.user_id "
+            "WHERE u.active=1 GROUP BY workplace_id").fetchall()}
         return render_template("admin_settings.html", s=sets, my_ip=client_ip(), my_ip_ok=in_office_network(client_ip()),
+                               counts=counts, policy=location_policy(),
                                workplaces=db.execute("SELECT * FROM workplaces").fetchall(),
                                holidays=db.execute("SELECT * FROM holidays WHERE day>=? ORDER BY day",
                                                    (f"{today().year}-01-01",)).fetchall())
+
+    @app.route("/admin/workplaces/<int:wid>", methods=["GET", "POST"])
+    @role_required("admin")
+    def admin_workplace(wid):
+        db = get_db()
+        wp = db.execute("SELECT * FROM workplaces WHERE id=?", (wid,)).fetchone()
+        if not wp:
+            abort(404)
+        if request.method == "POST":
+            f = request.form
+            try:
+                lat, lon, radius = float(f["lat"]), float(f["lon"]), int(f.get("radius_m") or 200)
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180 and 10 <= radius <= 5000 and f["name"].strip()):
+                    raise ValueError
+            except (KeyError, ValueError):
+                flash("근무지명, 위도·경도, 반경(10~5000m)을 확인하세요.")
+                return redirect(url_for("admin_workplace", wid=wid))
+            db.execute("UPDATE workplaces SET name=?, lat=?, lon=?, radius_m=?, kind=? WHERE id=?",
+                       (f["name"].strip(), lat, lon, radius, "hq" if f.get("kind") == "hq" else "site", wid))
+            ids = {int(x) for x in f.getlist("members") if x.isdigit()}
+            db.execute("DELETE FROM user_workplaces WHERE workplace_id=?", (wid,))
+            for uid in ids:
+                db.execute("INSERT OR IGNORE INTO user_workplaces(user_id, workplace_id) VALUES (?,?)", (uid, wid))
+            audit(current_user()["id"], "workplace_update", wid, f"{f['name'].strip()} 배정 {len(ids)}명")
+            db.commit()
+            flash(f"'{f['name'].strip()}' 저장 — 배정 {len(ids)}명")
+            return redirect(url_for("admin_settings"))
+        members = {r["user_id"] for r in db.execute("SELECT user_id FROM user_workplaces WHERE workplace_id=?",
+                                                     (wid,)).fetchall()}
+        users = db.execute("SELECT u.id, u.name, u.position, d.name AS dept FROM users u LEFT JOIN departments d "
+                           "ON d.id=u.department_id WHERE u.active=1 ORDER BY d.name, u.name").fetchall()
+        return render_template("admin_workplace.html", wp=wp, users=users, members=members)
 
     @app.route("/admin/notices", methods=["POST"])
     @role_required("admin", "manager")
