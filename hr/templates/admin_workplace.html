@@ -10,7 +10,8 @@
       <label>위도<input name="lat" value="{{ wp.lat }}" required></label>
       <label>경도<input name="lon" value="{{ wp.lon }}" required></label>
       <label>반경(m)<input type="number" name="radius_m" value="{{ wp.radius_m }}" min="10" max="5000"></label>
-      <div><button type="button" class="btn small" id="here">지금 이 위치로 좌표 바꾸기</button></div>
+      <div class="row"><button type="button" class="btn small" id="findmap">지도에서 좌표 찾기</button>
+        <button type="button" class="btn small" id="here">지금 이 위치로 좌표 바꾸기</button></div>
     </div>
     <h2>배정 직원 <small class="muted">이 근무지에서 출근하는 직원 (여러 근무지 배정 가능)</small></h2>
     <div class="chip-row">{% for u in users %}<label><input type="checkbox" name="members" value="{{ u.id }}" {{ 'checked' if u.id in members }}><span>{{ u.name }} {{ u.position or '' }}{% if u.dept %} · {{ u.dept }}{% endif %}</span></label>{% endfor %}</div>
@@ -20,10 +21,5 @@
 </section>
 {% endblock %}
 {% block script %}
-<script>
-document.getElementById('here').onclick = () => navigator.geolocation ? navigator.geolocation.getCurrentPosition(p => {
-  document.querySelector('[name=lat]').value = p.coords.latitude.toFixed(6);
-  document.querySelector('[name=lon]').value = p.coords.longitude.toFixed(6);
-}, e => alert('위치를 가져오지 못했습니다(HTTPS 접속 필요): ' + e.message)) : alert('위치 기능을 쓸 수 없습니다.');
-</script>
+<script src="{{ asset('coords.js') }}"></script>
 {% endblock %}

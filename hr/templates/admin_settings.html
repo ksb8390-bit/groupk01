@@ -44,9 +44,10 @@
   <form method="post" class="row">
     <input type="hidden" name="csrf" value="{{ csrf_token() }}"><input type="hidden" name="section" value="workplace_add">
     <select name="kind" style="width:auto"><option value="site">현장</option><option value="hq">본사</option></select>
-    <input name="name" placeholder="근무지명 (본사, ○○현장)" required>
+    <input name="name" placeholder="근무지명 또는 주소 (예: 그룹케이 본사)" required>
     <input name="lat" placeholder="위도 33.xxx" required><input name="lon" placeholder="경도 126.xxx" required>
     <input name="radius_m" type="number" value="200" style="width:6em"> m
+    <button type="button" class="btn small" id="findmap">지도에서 좌표 찾기</button>
     <button type="button" class="btn small" id="here">현재위치</button>
     <button class="btn primary small">추가</button>
   </form>
@@ -63,10 +64,5 @@
 </section>
 {% endblock %}
 {% block script %}
-<script>
-document.getElementById('here').onclick = () => navigator.geolocation.getCurrentPosition(p => {
-  document.querySelector('[name=lat]').value = p.coords.latitude.toFixed(6);
-  document.querySelector('[name=lon]').value = p.coords.longitude.toFixed(6);
-}, e => alert('위치를 가져오지 못했습니다: ' + e.message));
-</script>
+<script src="{{ asset('coords.js') }}"></script>
 {% endblock %}
