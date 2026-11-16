@@ -94,6 +94,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     chat.register(app)
     from . import importer
     importer.register(app)
+    from . import accounts_pdf
+    accounts_pdf.register(app)
     return app
 
 
@@ -404,6 +406,17 @@ def _register_cli(app: Flask):
 
 def _register_filters(app: Flask):
     @app.context_processor
+    def static_version():
+        """정적 파일 주소에 수정시각을 붙여 휴대폰이 예전·깨진 CSS를 캐시해 두지 않게 함."""
+        def asset(name):
+            try:
+                v = int(os.path.getmtime(os.path.join(app.static_folder, name)))
+            except OSError:
+                v = 0
+            return url_for("static", filename=name, v=v)
+        return {"asset": asset}
+
+    @app.context_processor
     def inject():
         return {
             "me": current_user(),
@@ -476,15 +489,22 @@ def _register_routes(app: Flask):
             login_id = request.form.get("login_id", "").strip()
             db = get_db()
             since = (now() - timedelta(minutes=LOCK_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+            # 최근 10분 실패 중, 관리자가 비밀번호 초기화(잠금 해제)한 시각 '이후' 실패만 계산
             fails = db.execute("SELECT COUNT(*) c FROM audit_log WHERE action='login_fail' AND target=? "
-                               "AND created_at>=?", (login_id, since)).fetchone()["c"]
+                               "AND created_at>=? AND created_at>? AND id>COALESCE((SELECT MAX(id) FROM audit_log "
+                               "WHERE action='login_unlock' AND target=?), 0)",
+                               (login_id.lower(), since, "", login_id.lower())).fetchone()["c"]
             if fails >= LOCK_FAILS:
                 flash(f"로그인 실패가 {LOCK_FAILS}회 누적되어 {LOCK_MINUTES}분간 잠겼습니다. 잠시 후 다시 시도하거나 관리자에게 문의하세요.")
                 return render_template("login.html")
-            row = db.execute("SELECT * FROM users WHERE login_id=? AND active=1", (login_id,)).fetchone()
-            if not (row and check_password_hash(row["password_hash"], request.form.get("password", ""))):
+            # 휴대폰 키보드의 첫 글자 대문자·붙여넣기 공백에 관대하게: 아이디는 대소문자 무시, 비밀번호는 앞뒤 공백 재시도
+            row = db.execute("SELECT * FROM users WHERE login_id=? COLLATE NOCASE AND active=1", (login_id,)).fetchone()
+            pw = request.form.get("password", "")
+            ok = bool(row) and (check_password_hash(row["password_hash"], pw) or
+                                (pw != pw.strip() and check_password_hash(row["password_hash"], pw.strip())))
+            if not ok:
                 db.execute("INSERT INTO audit_log(actor_id, action, target, detail, created_at) VALUES (?,?,?,?,?)",
-                           (None, "login_fail", login_id, request.remote_addr or "",
+                           (None, "login_fail", login_id.lower(), request.remote_addr or "",
                             now().strftime("%Y-%m-%d %H:%M:%S")))
                 db.commit()
                 row = None
@@ -496,7 +516,7 @@ def _register_routes(app: Flask):
                 session.permanent = True
                 nxt = request.args.get("next", "")
                 return redirect(nxt if nxt.startswith("/") and not nxt.startswith("//") else url_for("home"))
-            flash("아이디 또는 비밀번호가 올바르지 않습니다.")
+            flash("아이디 또는 비밀번호가 올바르지 않습니다. 안내받은 아이디(사원번호)와 임시 비밀번호(영문 소문자·숫자 8자리)를 확인하세요.")
         return render_template("login.html")
 
     @app.route("/logout", methods=["POST"])
@@ -1034,19 +1054,31 @@ def _register_routes(app: Flask):
         edit = None
         if request.args.get("edit", type=int):
             edit = db.execute("SELECT * FROM users WHERE id=?", (request.args.get("edit", type=int),)).fetchone()
-        return render_template("admin_users.html", users=users, depts=depts, edit=edit,
+        since = (now() - timedelta(minutes=LOCK_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+        locked = {r["target"] for r in db.execute(
+            "SELECT target, COUNT(*) c FROM audit_log WHERE action='login_fail' AND created_at>=? AND target NOT IN "
+            "(SELECT target FROM audit_log WHERE action='login_unlock' AND created_at>=?) GROUP BY target",
+            (since, since)).fetchall() if r["c"] >= LOCK_FAILS}
+        return render_template("admin_users.html", users=users, depts=depts, edit=edit, locked=locked,
                                bals={u["id"]: leave_balance(u) for u in users})
 
     @app.route("/admin/users/<int:uid>/reset", methods=["POST"])
     @role_required("admin")
     def reset_password(uid):
         db = get_db()
-        temp = secrets.token_urlsafe(6)
+        u = db.execute("SELECT login_id FROM users WHERE id=?", (uid,)).fetchone()
+        if not u:
+            abort(404)
+        from .importer import PW_CHARS
+        temp = "".join(secrets.choice(PW_CHARS) for _ in range(8))     # 휴대폰에서 입력하기 쉬운 소문자·숫자
         db.execute("UPDATE users SET password_hash=?, must_change_pw=1 WHERE id=?",
                    (hash_pw(temp), uid))
         audit(current_user()["id"], "password_reset", uid)
+        db.execute("INSERT INTO audit_log(actor_id, action, target, detail, created_at) VALUES (?,?,?,?,?)",
+                   (current_user()["id"], "login_unlock", u["login_id"].lower(), "비밀번호 초기화로 잠금 해제",
+                    now().strftime("%Y-%m-%d %H:%M:%S")))
         db.commit()
-        flash(f"임시 비밀번호: {temp} (직원에게 전달 후 첫 로그인 시 변경)")
+        flash(f"아이디 {u['login_id']} / 임시 비밀번호: {temp} (로그인 잠금도 해제됨. 첫 로그인 시 변경)")
         return redirect(url_for("admin_users"))
 
     @app.route("/admin/departments", methods=["POST"])

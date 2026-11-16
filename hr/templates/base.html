@@ -10,7 +10,7 @@
 <link rel="manifest" href="{{ url_for('manifest') }}">
 <link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
 <link rel="icon" href="{{ url_for('static', filename='icon-192.png') }}">
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="{{ asset('style.css') }}">
 <title>{% block title %}{{ company }} 근태관리{% endblock %}</title>
 </head>
 <body class="{% block bodyclass %}{% endblock %}">

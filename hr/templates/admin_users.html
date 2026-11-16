@@ -30,7 +30,7 @@
     <thead><tr><th>이름</th><th>아이디</th><th>부서/직위</th><th>권한</th><th>입사일</th><th>연차잔여</th><th>위치동의</th><th></th></tr></thead>
     <tbody>{% for u in users %}
     <tr class="{{ 'off' if not u.active }}">
-      <td>{{ u.name }}</td><td class="small">{{ u.login_id }}</td><td class="small">{{ u.dept or '' }} {{ u.position or '' }}</td>
+      <td>{{ u.name }}{% if u.login_id|lower in locked %} <span class="st rejected" title="로그인 5회 실패로 10분 잠김 — PW초기화로 해제">잠김</span>{% endif %}{% if u.must_change_pw %} <span class="st" title="아직 첫 로그인(비밀번호 변경) 전">미접속</span>{% endif %}</td><td class="small">{{ u.login_id }}</td><td class="small">{{ u.dept or '' }} {{ u.position or '' }}</td>
       <td>{{ ROLES[u.role] }}</td><td class="small">{{ u.hire_date }}</td><td>{{ '%g'|format(bals[u.id].remain) }}</td>
       <td>{{ 'O' if u.location_consent else '-' }}</td>
       <td class="row"><a href="?edit={{ u.id }}">수정</a>

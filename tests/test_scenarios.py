@@ -208,3 +208,44 @@ def test_admin_leave_shows_expiring_period(app):
     page = a.get("/admin/leave").get_data(as_text=True)
     # 기준일 2026-11-10 → kim 기간 2025-12-01~2026-11-30 (D-20)
     assert "60일 안에 연차 기간이 끝나는 직원" in page and "2026-11-30 종료 (D-20)" in page
+
+
+def _login_raw(client, login_id, pw):
+    page = client.get("/login").get_data(as_text=True)
+    tok = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+    return client.post("/login", data={"login_id": login_id, "password": pw, "csrf": tok})
+
+
+def test_login_tolerates_capitalised_id_and_pasted_spaces(app):
+    assert _login_raw(app.test_client(), "KIM", "pw123456").status_code == 302          # 첫 글자 대문자
+    assert _login_raw(app.test_client(), " kim ", " pw123456 ").status_code == 302      # 붙여넣기 공백
+    assert _login_raw(app.test_client(), "kim", "pw12345").status_code == 200           # 틀린 비밀번호
+
+
+def test_admin_reset_unlocks_and_marks(app):
+    c = app.test_client()
+    for _ in range(5):
+        _login_raw(c, "Kim", "wrong")
+    assert _login_raw(c, "kim", "pw123456").status_code == 200                           # 잠김
+    a = app.test_client(); at = login(a, "admin")
+    assert "잠김" in a.get("/admin/users").get_data(as_text=True)
+    r = a.post("/admin/users/2/reset", data={"csrf": at}, follow_redirects=True)
+    temp = re.search(r"임시 비밀번호: ([a-z0-9]{8})", r.get_data(as_text=True)).group(1)
+    assert _login_raw(app.test_client(), "kim", temp).status_code == 302                 # 해제 + 새 비밀번호
+
+
+def test_account_sheet_pdf(app, tmp_path):
+    from hr.importer import save_accounts_xlsx
+    x = tmp_path / "acc.xlsx"
+    save_accounts_xlsx([["관리자", "admin", "(기존 비밀번호 유지)", "관리자", "", "대표이사", "2010-01-02"],
+                        ["홍길동", "4174980", "k7mq2xra", "직원", "설계사업본부", "대리", "2024-03-01"]], str(x))
+    out = tmp_path / "a.pdf"
+    r = app.test_cli_runner().invoke(args=["account-sheet", "--xlsx", str(x), "--out", str(out),
+                                           "--url", "http://192.168.1.119:5050"])
+    assert r.exit_code == 0, r.output
+    assert "목록 2명, 개인 안내장 1장" in r.output and out.read_bytes()[:4] == b"%PDF"
+    # 엑셀 분실 → 첫 로그인 전 직원만 재발급
+    with app.app_context():
+        db = get_db(); db.execute("UPDATE users SET must_change_pw=1 WHERE login_id='kim'"); db.commit()
+    r = app.test_cli_runner().invoke(args=["account-sheet", "--reissue", "--out", str(out)], input="y\n")
+    assert r.exit_code == 0, r.output and "개인 안내장 1장" in r.output
