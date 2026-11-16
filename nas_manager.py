@@ -915,21 +915,25 @@ def cmd_cleanup_all(args, cfg):
 # =========================
 
 def cmd_compare(args, cfg):
-    src, dst = os.path.abspath(args.src), os.path.abspath(args.dst)
+    src = os.path.abspath(args.src)
+    dsts = [os.path.abspath(d) for d in args.dst]
     nfc = lambda p: unicodedata.normalize("NFC", p)
     now = time.time()
     index = {}
     if args.deep:
-        print(f"[1/2] 기준 폴더 색인(파일명+크기) : {dst}")
         k = 0
-        for _, fn, full, st in walk(dst, cfg, [], skip={nfc(src)}):
-            index.setdefault((nfc(fn).lower(), st.st_size), full)
-            k += 1
-            if k % 50000 == 0:
-                print(f"  … {k:,}개")
-        print(f"  색인 {k:,}개")
+        for dst in dsts:
+            print(f"[색인] 기준 폴더(파일명+크기) : {dst}")
+            for _, fn, full, st in walk(dst, cfg, [], skip={nfc(src)} | {nfc(x) for x in cfg.get("compare_skip", [])}):
+                if nfc(full).startswith(nfc(src) + os.sep):
+                    continue
+                index.setdefault((nfc(fn).lower(), st.st_size), full)
+                k += 1
+                if k % 50000 == 0:
+                    print(f"  … {k:,}개")
+        print(f"  색인 합계 {k:,}개")
 
-    print(f"[{'2/2' if args.deep else '1/1'}] 대조 : {src}  →  {dst}")
+    print(f"[대조] {src}  →  기준 {len(dsts)}곳: {', '.join(dsts)}")
     cats = ("동일(같은 경로)", "동일(다른 위치)", "크기 다름", "내용 다름", "유일본(기준 폴더에 없음)")
     tot = {c: [0, 0] for c in cats}
     by_top = defaultdict(lambda: {**{c: [0, 0] for c in cats}, "최근수정": 0.0})
@@ -943,7 +947,12 @@ def cmd_compare(args, cfg):
         top = rel.split(os.sep)[0] if os.sep in rel else "(루트 파일)"
         if valid_mtime(st.st_mtime, now):
             by_top[top]["최근수정"] = max(by_top[top]["최근수정"], st.st_mtime)
-        other = _exists_any(os.path.join(dst, rel))
+        other = None
+        for dst in dsts:
+            other = _exists_any(os.path.join(dst, rel))
+            if other and os.path.isfile(other):
+                break
+            other = None
         where = other or ""
         if other and os.path.isfile(other):
             if os.path.getsize(other) != st.st_size:
@@ -1026,7 +1035,7 @@ def main():
 
     p = sub.add_parser("compare", help="폴더 A의 파일이 폴더 B에 이미 있는지 대조 (파일 변경 없음)")
     p.add_argument("src", help="확인할 폴더 (예: 휴지통·옛 사본)")
-    p.add_argument("dst", help="기준 폴더 (실제 자료)")
+    p.add_argument("dst", nargs="+", help="기준 폴더 (실제 자료). 여러 개 지정 가능 (예: 다른 NAS 공유폴더들)")
     p.add_argument("--deep", action="store_true", help="기준 폴더 전체를 파일명+크기로 색인해 위치가 바뀐 파일도 찾음")
     p.add_argument("--hash", action="store_true", help="동일 판정 시 전체 해시까지 비교 (느림, 정확)")
 
@@ -1043,7 +1052,7 @@ def main():
         if not os.path.isfile(args.plan):
             sys.exit(f"[오류] 계획서 없음: {args.plan}")
     elif args.cmd == "compare":
-        for x in (args.src, args.dst):
+        for x in [args.src] + args.dst:
             if not os.path.isdir(x):
                 sys.exit(f"[오류] 폴더가 없거나 접근 불가: {x}")
     elif not os.path.isdir(args.root):
