@@ -989,7 +989,8 @@ def cmd_compare(args, cfg):
     if not args.deep:
         print("  ※ 위치가 바뀐 파일은 '유일본'으로 잡힘 → 정확히 보려면 --deep (기준 폴더 전체 색인)")
     detail.sort(key=lambda r: (r[0], -r[2]))
-    write_sheets("compare", {
+    tag = re.sub(r"[^\w가-힣-]+", "_", unicodedata.normalize("NFC", os.path.basename(src)))[:40]
+    write_sheets(f"compare_{tag}", {
         "요약": (["구분", "파일수", "용량(GB)", "비율(%)"], sum_rows),
         "1차폴더별": (["폴더", "전체(GB)", "기준에 있음(GB)", "없음·다름(GB)", "중복률(%)", "최근수정"], top_rows),
         "유일본·다름": (["구분", "경로", "크기(MB)", "수정일", "기준 폴더 쪽 경로"], detail[:1_000_000]),
