@@ -925,8 +925,8 @@ def cmd_compare(args, cfg):
         for dst in dsts:
             print(f"[색인] 기준 폴더(파일명+크기) : {dst}")
             for _, fn, full, st in walk(dst, cfg, [], skip={nfc(src)} | {nfc(x) for x in cfg.get("compare_skip", [])}):
-                if nfc(full).startswith(nfc(src) + os.sep):
-                    continue
+                if nfc(full).startswith(nfc(src) + os.sep) or (os.sep + "Network Trash") in full:
+                    continue   # 휴지통 안의 사본은 '실제 자료'로 치지 않음
                 index.setdefault((nfc(fn).lower(), st.st_size), full)
                 k += 1
                 if k % 50000 == 0:
@@ -950,7 +950,7 @@ def cmd_compare(args, cfg):
         other = None
         for dst in dsts:
             other = _exists_any(os.path.join(dst, rel))
-            if other and os.path.isfile(other):
+            if other and os.path.isfile(other) and (os.sep + "Network Trash") not in other:
                 break
             other = None
         where = other or ""
