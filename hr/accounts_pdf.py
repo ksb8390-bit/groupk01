@@ -211,7 +211,7 @@ def register(app):
             db.execute("INSERT INTO audit_log(actor_id, action, target, detail) VALUES (NULL,'password_reissue',?,?)",
                        (f"{len(pending)}명", "account-sheet --reissue"))
             db.commit()
-            save_accounts_xlsx(xl, os.path.join(base, "직원계정_임시비밀번호.xlsx"))
+            save_accounts_xlsx(xl, os.path.join(os.path.dirname(os.path.abspath(out)), "직원계정_임시비밀번호.xlsx"))
         else:
             xlsx = xlsx or os.path.join(base, "직원계정_임시비밀번호.xlsx")
             if not os.path.exists(xlsx):

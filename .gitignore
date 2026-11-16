@@ -8,3 +8,7 @@ backup/
 *.sqlite3
 .venv/
 .pytest_cache/
+# 직원 계정·임시 비밀번호 파일은 저장소에 올리지 않음
+직원계정_*.xlsx
+직원계정_*.pdf
+*.sqlite3
